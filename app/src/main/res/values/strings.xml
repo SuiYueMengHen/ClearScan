@@ -1,3 +1,10 @@
 <resources>
     <string name="app_name">ClearScan</string>
+    <string name="notification_channel_updates">App updates</string>
+    <string name="update_available">ClearScan update available</string>
+    <string name="camera_permission_required">Camera permission is required to scan.</string>
+    <string name="scan_failed">Scanning failed. Please try again.</string>
+    <string name="document_edges_unclear">Document edges are unclear. Adjust the corners manually.</string>
+    <string name="no_browser">No browser can open this link.</string>
+    <string name="export_complete">Export complete</string>
 </resources>

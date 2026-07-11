@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">ClearScan</string>
+    <string name="notification_channel_updates">应用更新</string>
+    <string name="update_available">ClearScan 有可用更新</string>
+    <string name="camera_permission_required">扫描需要相机权限。</string>
+    <string name="scan_failed">扫描失败，请重试。</string>
+    <string name="document_edges_unclear">文档边缘不清晰，请手动调整四角。</string>
+    <string name="no_browser">没有可打开此链接的浏览器。</string>
+    <string name="export_complete">导出完成</string>
+</resources>

@@ -39,11 +39,14 @@ import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.Camera
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.exifinterface.media.ExifInterface
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -100,7 +103,12 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.DocumentScanner
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.FlashAuto
+import androidx.compose.material.icons.filled.FlashOff
+import androidx.compose.material.icons.filled.FlashOn
+import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Image
@@ -128,6 +136,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -142,6 +151,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -149,6 +159,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.key
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
@@ -212,6 +223,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executor
+import java.util.concurrent.Executors
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
 import com.google.android.gms.tasks.Tasks
@@ -323,6 +335,17 @@ private fun centeredCropRatio(widthOverHeight: Float): List<Offset> {
     )
 }
 
+fun encodeCropPoints(points: List<Offset>): String = points.take(4).joinToString(";") { "${it.x},${it.y}" }
+
+fun decodeCropPoints(value: String): List<Offset> = value.split(';').mapNotNull { pair ->
+    val values = pair.split(',')
+    if (values.size != 2) null else {
+        val x = values[0].toFloatOrNull()
+        val y = values[1].toFloatOrNull()
+        if (x == null || y == null) null else Offset(x.coerceIn(0f, 1f), y.coerceIn(0f, 1f))
+    }
+}.takeIf { it.size == 4 } ?: defaultCropPoints()
+
 private fun requiredTypesFor(tool: String?): Set<String> = when (tool) {
     "PDF to Image", "PDF Edit", "Merge PDF", "Split PDF", "Compress PDF" -> setOf("PDF")
     "Image to PDF", "Image Format Converter" -> setOf("JPG", "JPEG", "PNG", "WEBP", "BMP", "IMAGE")
@@ -377,7 +400,7 @@ private fun toolLabel(tool: String, settings: AppSettings): String = when (tool)
     else -> tool
 }
 
-private fun tr(settings: AppSettings, english: String, chinese: String): String {
+fun tr(settings: AppSettings, english: String, chinese: String): String {
     return if (settings.language == "中文") chinese else english
 }
 
@@ -396,32 +419,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@Entity(tableName = "documents")
-data class Document(
-    @PrimaryKey val id: Long,
-    val title: String,
-    val type: String,
-    val createdAt: Long,
-    val sizeBytes: Long,
-    val pageCount: Int,
-    val thumbnailPath: String,
-    val exportPath: String,
-)
-
-@Entity(tableName = "scan_pages")
-data class ScanPage(
-    @PrimaryKey val id: Long,
-    val documentId: Long,
-    val originalPath: String,
-    val processedPath: String,
-    val cropPoints: String,
-    val filter: String,
-    val brightness: Float,
-    val contrast: Float,
-    val saturation: Float,
-    val rotation: Int,
-)
-
 data class AppSettings(
     val language: String = "English",
     val theme: String = "Light",
@@ -430,36 +427,13 @@ data class AppSettings(
     val accountEmail: String = "",
     val passwordMap: Map<Long, String> = emptyMap(),
     val defaultSavePath: String = "Internal Storage",
+    val autoCheckUpdates: Boolean = true,
+    val autoDownloadUpdates: Boolean = true,
+    val wifiOnlyUpdates: Boolean = true,
+    val cameraGrid: Boolean = false,
+    val cameraEnhance: Boolean = true,
+    val cameraResolution: String = "Balanced",
 )
-
-@Dao
-interface DocumentDao {
-    @Query("SELECT * FROM documents ORDER BY createdAt DESC")
-    fun observeDocuments(): Flow<List<Document>>
-
-    @Query("SELECT * FROM documents WHERE id = :id")
-    suspend fun document(id: Long): Document?
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsert(document: Document)
-
-    @Query("UPDATE documents SET title = :title WHERE id = :id")
-    suspend fun rename(id: Long, title: String)
-
-    @Query("DELETE FROM documents WHERE id = :id")
-    suspend fun deleteDocument(id: Long)
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsertPage(page: ScanPage)
-
-    @Query("SELECT * FROM scan_pages WHERE documentId = :documentId ORDER BY id")
-    suspend fun pages(documentId: Long): List<ScanPage>
-}
-
-@Database(entities = [Document::class, ScanPage::class], version = 1, exportSchema = false)
-abstract class ClearScanDatabase : RoomDatabase() {
-    abstract fun documentDao(): DocumentDao
-}
 
 enum class Tab(val title: String, val icon: ImageVector) {
     Home("Home", Icons.Default.Home),
@@ -470,8 +444,14 @@ enum class Tab(val title: String, val icon: ImageVector) {
 }
 
 enum class Screen {
-    Shell, Camera, Crop, Edit, Filter, Adjust, Save, Detail, Share, ToolSelect, Translate, Settings, Account, Help, About, Legal, AppLogs
+    Shell, Camera, Crop, Edit, Filter, Adjust, Save, Detail, Share, ToolSelect, WatermarkEditor, SignatureEditor, Translate, Settings, Account, Help, About, Legal, AppLogs
 }
+
+enum class DocumentCaptureMode { Single, Multi }
+
+@VisibleForTesting
+fun shouldOpenCropAfterCapture(scanMode: ScanMode, captureMode: DocumentCaptureMode): Boolean =
+    scanMode == ScanMode.Document && captureMode == DocumentCaptureMode.Single
 
 data class ModelSource(
     val id: String,
@@ -508,13 +488,28 @@ data class UiState(
     val tab: Tab = Tab.Home,
     val screen: Screen = Screen.Shell,
     val documents: List<Document> = emptyList(),
+    val folders: List<FolderEntity> = emptyList(),
+    val currentFolderId: Long? = null,
     val query: String = "",
     val selected: Document? = null,
     val scanBitmap: Bitmap? = null,
     val processedBitmap: Bitmap? = null,
     val scanSourcePath: String? = null,
     val cropPoints: List<Offset> = defaultCropPoints(),
-    val qrMode: Boolean = false,
+    val autoCropPoints: List<Offset> = emptyList(),
+    val detectionStatus: DocumentDetectionStatus = DocumentDetectionStatus.Idle,
+    val detectionConfidence: Float = 0f,
+    val detectionProcessingMs: Long = 0L,
+    val scanMode: ScanMode = ScanMode.Document,
+    val documentCaptureMode: DocumentCaptureMode = DocumentCaptureMode.Single,
+    val liveDocumentFrame: LiveDocumentFrame? = null,
+    val scanSessionId: Long? = null,
+    val draftPages: List<DraftScanPageEntity> = emptyList(),
+    val currentDraftIndex: Int = 0,
+    val codeResult: CodeScanResult? = null,
+    val updateInfo: UpdateInfo? = null,
+    val updateDownload: UpdateDownloadState = UpdateDownloadState(),
+    val checkingUpdate: Boolean = false,
     val backStack: List<Screen> = emptyList(),
     val activeTool: String? = null,
     val selectedToolIds: Set<Long> = emptySet(),
@@ -531,15 +526,19 @@ data class UiState(
 )
 
 class ClearScanViewModel(application: Application) : AndroidViewModel(application) {
-    private val database = Room.databaseBuilder(application, ClearScanDatabase::class.java, "clearscan.db").build()
+    private val database = Room.databaseBuilder(application, ClearScanDatabase::class.java, "clearscan.db")
+        .addMigrations(ClearScanDatabase.MIGRATION_1_2)
+        .build()
     private val dao = database.documentDao()
     private val prefs = application.getSharedPreferences("clearscan-settings", Context.MODE_PRIVATE)
+    private val settingsRepository = SettingsRepository(application)
     private val settingsFlow = MutableStateFlow(loadSettings())
     private val queryFlow = MutableStateFlow("")
     private val navFlow = MutableStateFlow(UiState())
     private var allDocuments: List<Document> = emptyList()
     private var downloadCancelRequested = false
     private var translationEngine: InferenceEngine? = null
+    private var detectionRequestId = 0L
 
     private val modelSources = listOf(
             ModelSource(
@@ -568,10 +567,15 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             ),
     )
 
-    val ui: StateFlow<UiState> = combine(dao.observeDocuments(), settingsFlow, queryFlow, navFlow) { docs, settings, query, nav ->
+    val ui: StateFlow<UiState> = combine(dao.observeDocuments(), dao.observeFolders(), settingsFlow, queryFlow, navFlow) { docs, folders, settings, query, nav ->
         allDocuments = docs
+        val visibleDocs = docs.filter { document ->
+            val matchesQuery = document.title.contains(query, ignoreCase = true)
+            matchesQuery && (query.isNotBlank() || document.folderId == nav.currentFolderId)
+        }
         nav.copy(
-            documents = docs.filter { it.title.contains(query, ignoreCase = true) },
+            documents = visibleDocs,
+            folders = folders,
             query = query,
             settings = settings,
         )
@@ -582,6 +586,20 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         AppLogger.i("ViewModel", "ClearScanViewModel created")
         refreshTranslationModelState()
         viewModelScope.launch {
+            settingsFlow.value = settingsRepository.load(settingsFlow.value)
+            val session = withContext(Dispatchers.IO) { dao.latestSession() }
+            if (session != null) {
+                val pages = withContext(Dispatchers.IO) { dao.draftPages(session.id) }
+                if (pages.isNotEmpty()) {
+                    navFlow.value = navFlow.value.copy(
+                        scanSessionId = session.id,
+                        scanMode = runCatching { ScanMode.valueOf(session.mode) }.getOrDefault(ScanMode.Document),
+                        documentCaptureMode = if (session.mode == ScanMode.Document.name) DocumentCaptureMode.Multi else DocumentCaptureMode.Single,
+                        draftPages = pages,
+                        captureMessage = tr(settingsFlow.value, "An unfinished ${pages.size}-page scan was restored", "已恢复未完成的 ${pages.size} 页扫描"),
+                    )
+                }
+            }
             seedIfEmpty()
         }
     }
@@ -604,14 +622,127 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         queryFlow.value = query
     }
 
+    fun openFolder(folderId: Long?) {
+        queryFlow.value = ""
+        navFlow.value = navFlow.value.copy(currentFolderId = folderId)
+    }
+
+    fun createFolder(name: String) {
+        val clean = name.trim().take(80)
+        if (clean.isBlank()) return
+        val state = navFlow.value
+        if (state.folders.any { it.parentId == state.currentFolderId && it.name.equals(clean, true) }) {
+            navFlow.value = state.copy(captureMessage = if (state.settings.language == "中文") "同级目录下已存在同名文件夹" else "A folder with this name already exists here")
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val id = System.currentTimeMillis()
+            dao.upsertFolder(FolderEntity(id, clean, state.currentFolderId, id))
+            AppLogger.i("Folder", "Create folder id=$id parent=${state.currentFolderId}")
+        }
+    }
+
+    fun renameFolder(folder: FolderEntity, name: String) {
+        val clean = name.trim().take(80)
+        if (clean.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) { dao.upsertFolder(folder.copy(name = clean)) }
+    }
+
+    fun deleteFolder(folder: FolderEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            dao.moveFolderDocumentsToParent(folder.id, folder.parentId)
+            dao.moveChildFoldersToParent(folder.id, folder.parentId)
+            dao.deleteFolder(folder.id)
+            if (navFlow.value.currentFolderId == folder.id) navFlow.value = navFlow.value.copy(currentFolderId = folder.parentId)
+            AppLogger.i("Folder", "Delete folder id=${folder.id}; contents moved to parent=${folder.parentId}")
+        }
+    }
+
+    fun moveDocument(document: Document, folderId: Long?) {
+        viewModelScope.launch(Dispatchers.IO) { dao.moveDocument(document.id, folderId) }
+    }
+
     fun openCamera() {
         AppLogger.i("Scan", "Open camera")
-        go(Screen.Camera) { copy(captureMessage = null, qrMode = false, activeTool = null, selectedToolIds = emptySet()) }
+        startScanMode(ScanMode.Document)
     }
 
     fun openQrScanner() {
-        AppLogger.i("QR", "Open QR scanner")
-        go(Screen.Camera) { copy(captureMessage = null, qrMode = true, activeTool = "QR Code Scan", selectedToolIds = emptySet()) }
+        startScanMode(ScanMode.QrCode)
+    }
+
+    fun startScanMode(mode: ScanMode) {
+        AppLogger.i("Scan", "Open camera mode=${mode.name}")
+        val sessionId = if (mode in listOf(ScanMode.Document, ScanMode.Book, ScanMode.IdCard)) System.currentTimeMillis() else null
+        if (sessionId != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                dao.upsertSession(ScanSessionEntity(sessionId, mode.name, sessionId, sessionId))
+            }
+        }
+        go(Screen.Camera) {
+            copy(
+                captureMessage = null,
+                scanMode = mode,
+                documentCaptureMode = DocumentCaptureMode.Single,
+                liveDocumentFrame = null,
+                scanSessionId = sessionId,
+                draftPages = emptyList(),
+                currentDraftIndex = 0,
+                activeTool = null,
+                selectedToolIds = emptySet(),
+            )
+        }
+    }
+
+    fun changeScanMode(mode: ScanMode) {
+        val state = navFlow.value
+        if (state.draftPages.isNotEmpty()) {
+            navFlow.value = state.copy(captureMessage = if (state.settings.language == "中文") "请先完成或退出当前多页扫描" else "Finish or exit the current multi-page scan first")
+            return
+        }
+        val previousSessionId = state.scanSessionId
+        val sessionId = if (mode in listOf(ScanMode.Document, ScanMode.Book, ScanMode.IdCard)) System.currentTimeMillis() else null
+        navFlow.value = state.copy(scanMode = mode, scanSessionId = sessionId, codeResult = null, liveDocumentFrame = null, captureMessage = null)
+        viewModelScope.launch(Dispatchers.IO) {
+            if (previousSessionId != null && previousSessionId != sessionId) dao.deleteSession(previousSessionId)
+            if (sessionId != null) dao.upsertSession(ScanSessionEntity(sessionId, mode.name, sessionId, System.currentTimeMillis()))
+        }
+    }
+
+    fun changeDocumentCaptureMode(mode: DocumentCaptureMode) {
+        val state = navFlow.value
+        if (state.scanMode != ScanMode.Document || state.draftPages.isNotEmpty()) return
+        navFlow.value = state.copy(documentCaptureMode = mode, captureMessage = null)
+    }
+
+    fun discardScanAndChangeMode(mode: ScanMode) {
+        val state = navFlow.value
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                state.scanSessionId?.let { sessionId ->
+                    dao.deleteDraftPages(sessionId)
+                    dao.deleteSession(sessionId)
+                }
+            }
+            navFlow.value = navFlow.value.copy(draftPages = emptyList(), scanSessionId = null, currentDraftIndex = 0)
+            changeScanMode(mode)
+        }
+    }
+
+    fun onLiveDocumentFrame(frame: LiveDocumentFrame?) {
+        val state = navFlow.value
+        if (state.screen != Screen.Camera || state.scanMode !in listOf(ScanMode.Document, ScanMode.Book, ScanMode.IdCard)) return
+        navFlow.value = state.copy(liveDocumentFrame = frame)
+    }
+
+    fun onCodeDetected(result: CodeScanResult) {
+        if (navFlow.value.codeResult?.rawValue == result.rawValue) return
+        AppLogger.i("CodeScan", "Detected mode=${navFlow.value.scanMode} format=${result.format} type=${result.valueType}")
+        navFlow.value = navFlow.value.copy(codeResult = result, captureMessage = null)
+    }
+
+    fun clearCodeResult() {
+        navFlow.value = navFlow.value.copy(codeResult = null)
     }
 
     fun back() {
@@ -655,9 +786,14 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
                 processedBitmap = bitmap,
                 scanSourcePath = null,
                 cropPoints = defaultCropPoints(),
-                captureMessage = "Capturing... Please hold steady",
+                autoCropPoints = emptyList(),
+                detectionStatus = DocumentDetectionStatus.Detecting,
+                detectionConfidence = 0f,
+                cropPreset = "Auto",
+                captureMessage = tr(settingsFlow.value, "Capturing... Please hold steady", "正在拍摄，请保持稳定"),
                 )
             }
+            detectForCrop(bitmap)
         }
     }
 
@@ -673,13 +809,13 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             }
             if (bitmap == null) {
                 AppLogger.w("Camera", "Photo decode failed")
-                navFlow.value = navFlow.value.copy(captureMessage = "Photo capture failed. Please try again.")
-            } else if (navFlow.value.qrMode) {
+                navFlow.value = navFlow.value.copy(captureMessage = tr(settingsFlow.value, "Photo capture failed. Please try again.", "照片拍摄失败，请重试"))
+            } else if (navFlow.value.scanMode in listOf(ScanMode.QrCode, ScanMode.Barcode)) {
                 val result = withContext(Dispatchers.Default) { ImageProcessor.scanQr(bitmap) }
-                AppLogger.i("QR", "QR scan result: ${result ?: "none"}")
+                AppLogger.i("CodeScan", "${navFlow.value.scanMode} result: ${result ?: "none"}")
                 replace(Screen.Camera) {
                     copy(
-                    captureMessage = result ?: "No QR code found. Try again.",
+                    captureMessage = result ?: tr(settingsFlow.value, "No matching code found. Try again.", "未识别到对应编码，请重试"),
                     )
                 }
             } else {
@@ -687,15 +823,7 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
                     "Scan",
                     "Photo preview decoded ${bitmap.width}x${bitmap.height}, optimizedBytes=${sourceFile.length()}, opening crop",
                 )
-                go(Screen.Crop) {
-                    copy(
-                    scanBitmap = bitmap,
-                    processedBitmap = bitmap,
-                    scanSourcePath = sourceFile.absolutePath,
-                    cropPoints = ImageProcessor.detectDocumentCorners(bitmap),
-                    captureMessage = "Captured. Adjust the crop corners.",
-                    )
-                }
+                appendCapturedBitmap(bitmap, sourceFile)
             }
         }
     }
@@ -707,18 +835,166 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             }
             if (bitmap == null) {
                 AppLogger.w("Scan", "Unable to decode imported image: $uri")
-                navFlow.value = navFlow.value.copy(captureMessage = "Unable to open this image.")
+                navFlow.value = navFlow.value.copy(captureMessage = tr(settingsFlow.value, "Unable to open this image.", "无法打开此图片"))
                 return@launch
             }
-            go(Screen.Crop) {
-                copy(
-                    scanBitmap = bitmap,
-                    processedBitmap = bitmap,
-                    scanSourcePath = null,
-                    cropPoints = ImageProcessor.detectDocumentCorners(bitmap),
-                )
+            appendCapturedBitmap(bitmap, null)
+        }
+    }
+
+    private suspend fun appendCapturedBitmap(bitmap: Bitmap, sourceFile: File?) {
+        val state = navFlow.value
+        val sessionId = state.scanSessionId ?: System.currentTimeMillis().also { id ->
+            dao.upsertSession(ScanSessionEntity(id, state.scanMode.name, id, id))
+            navFlow.value = navFlow.value.copy(scanSessionId = id)
+        }
+        if (state.draftPages.size >= 100 || (state.scanMode == ScanMode.IdCard && state.draftPages.size >= 2)) {
+            navFlow.value = navFlow.value.copy(captureMessage = if (state.scanMode == ScanMode.IdCard) "ID front and back are already captured." else "A scan can contain up to 100 pages.")
+            return
+        }
+        val pageBitmaps = listOf(bitmap)
+        val remaining = (if (state.scanMode == ScanMode.IdCard) 2 else 100) - state.draftPages.size
+        val sessionDir = File(getApplication<Application>().filesDir, "scan_sessions/$sessionId").apply { mkdirs() }
+        val added = mutableListOf<DraftScanPageEntity>()
+        pageBitmaps.take(remaining).forEachIndexed { splitIndex, pageBitmap ->
+            val pageId = System.currentTimeMillis() + splitIndex
+            val original = File(sessionDir, "$pageId-original.jpg")
+            if (pageBitmaps.size == 1 && sourceFile != null && sourceFile.exists()) {
+                sourceFile.copyTo(original, overwrite = true)
+            } else {
+                ImageProcessor.writeJpeg(pageBitmap, original, 88)
+            }
+            val thumbnail = File(sessionDir, "$pageId-thumb.jpg")
+            ImageProcessor.writeJpeg(ImageProcessor.previewBitmap(pageBitmap, 640) ?: pageBitmap, thumbnail, 76)
+            val detection = withContext(Dispatchers.Default) { DocumentEdgeDetector.detect(pageBitmap, detectionProfileFor(state.scanMode)) }
+            val liveFallback = state.liveDocumentFrame?.takeIf { it.corners.size == 4 && it.confidence >= .42f }
+            val corners = detection.corners.takeIf { detection.status == DocumentDetectionStatus.Detected && it.size == 4 }
+                ?: liveFallback?.corners
+                ?: defaultCropPoints()
+            val confidence = if (detection.corners.size == 4) detection.confidence else liveFallback?.confidence ?: 0f
+            val entity = DraftScanPageEntity(
+                id = pageId,
+                sessionId = sessionId,
+                pageIndex = state.draftPages.size + added.size,
+                originalPath = original.absolutePath,
+                thumbnailPath = thumbnail.absolutePath,
+                cropPoints = encodeCropPoints(corners),
+                confidence = confidence,
+                sourceType = state.scanMode.name,
+            )
+            dao.upsertDraftPage(entity)
+            added += entity
+        }
+        val pages = state.draftPages + added
+        dao.upsertSession(ScanSessionEntity(sessionId, state.scanMode.name, sessionId, System.currentTimeMillis(), "CAPTURING"))
+        navFlow.value = navFlow.value.copy(
+            scanSessionId = sessionId,
+            draftPages = pages,
+            captureMessage = if (state.settings.language == "中文") "已拍摄 ${pages.size} 页" else "${pages.size} page${if (pages.size == 1) "" else "s"} captured",
+        )
+        if (shouldOpenCropAfterCapture(state.scanMode, state.documentCaptureMode) && added.isNotEmpty()) {
+            openDraftPage(added.first(), pages.indexOfFirst { it.id == added.first().id })
+        }
+    }
+
+    fun finishScanSession() {
+        val state = navFlow.value
+        val first = state.draftPages.firstOrNull() ?: return
+        viewModelScope.launch {
+            state.scanSessionId?.let { dao.upsertSession(ScanSessionEntity(it, state.scanMode.name, it, System.currentTimeMillis(), "CROPPING")) }
+            openDraftPage(first, 0)
+        }
+    }
+
+    fun resumeScanSession() {
+        if (navFlow.value.draftPages.isEmpty()) return
+        go(Screen.Camera) { copy(captureMessage = null) }
+    }
+
+    fun selectDraftPage(index: Int) {
+        navFlow.value.draftPages.getOrNull(index)?.let { openDraftPage(it, index) }
+    }
+
+    fun moveDraftPage(from: Int, to: Int) {
+        val state = navFlow.value
+        if (from !in state.draftPages.indices || to !in state.draftPages.indices || from == to) return
+        val reordered = state.draftPages.toMutableList().apply { add(to, removeAt(from)) }.mapIndexed { index, page -> page.copy(pageIndex = index) }
+        val selectedId = state.draftPages.getOrNull(state.currentDraftIndex)?.id
+        val newIndex = reordered.indexOfFirst { it.id == selectedId }.coerceAtLeast(0)
+        navFlow.value = state.copy(draftPages = reordered, currentDraftIndex = newIndex)
+        viewModelScope.launch(Dispatchers.IO) { reordered.forEach { dao.upsertDraftPage(it) } }
+    }
+
+    fun deleteCurrentDraft(retake: Boolean = false) {
+        val state = navFlow.value
+        val page = state.draftPages.getOrNull(state.currentDraftIndex) ?: return
+        viewModelScope.launch {
+            dao.deleteDraftPage(page.id)
+            val remaining = state.draftPages.filterNot { it.id == page.id }.mapIndexed { index, item -> item.copy(pageIndex = index) }
+            withContext(Dispatchers.IO) { remaining.forEach { dao.upsertDraftPage(it) } }
+            if (retake || remaining.isEmpty()) {
+                replace(Screen.Camera) { copy(draftPages = remaining, currentDraftIndex = 0, scanBitmap = null, processedBitmap = null) }
+            } else {
+                navFlow.value = state.copy(draftPages = remaining, currentDraftIndex = state.currentDraftIndex.coerceAtMost(remaining.lastIndex))
+                openDraftPage(remaining[navFlow.value.currentDraftIndex], navFlow.value.currentDraftIndex)
             }
         }
+    }
+
+    private fun openDraftPage(page: DraftScanPageEntity, index: Int) {
+        val bitmap = ImageProcessor.decodeCameraBitmap(page.originalPath, 2048) ?: return
+        val corners = decodeCropPoints(page.cropPoints)
+        val update: UiState.() -> UiState = {
+            copy(
+                scanBitmap = bitmap,
+                processedBitmap = bitmap,
+                scanSourcePath = page.originalPath,
+                currentDraftIndex = index,
+                cropPoints = corners,
+                autoCropPoints = corners,
+                detectionStatus = if (page.confidence >= .54f) DocumentDetectionStatus.Detected else DocumentDetectionStatus.LowConfidence,
+                detectionConfidence = page.confidence,
+                cropPreset = if (page.confidence >= .54f) "Auto" else "Original",
+                captureMessage = null,
+            )
+        }
+        if (navFlow.value.screen == Screen.Crop) replace(Screen.Crop, update) else go(Screen.Crop, update)
+    }
+
+    private suspend fun detectForCrop(bitmap: Bitmap) {
+        val requestId = ++detectionRequestId
+        navFlow.value = navFlow.value.copy(
+            detectionStatus = DocumentDetectionStatus.Detecting,
+            detectionConfidence = 0f,
+            captureMessage = tr(settingsFlow.value, "Detecting document edges...", "正在识别文档边缘..."),
+        )
+        val result = withContext(Dispatchers.Default) { DocumentEdgeDetector.detect(bitmap, detectionProfileFor(navFlow.value.scanMode)) }
+        val current = navFlow.value
+        if (requestId != detectionRequestId || current.screen != Screen.Crop || current.scanBitmap !== bitmap) {
+            AppLogger.i("ScanDetect", "Discard stale detection request=$requestId")
+            return
+        }
+        val accepted = result.status == DocumentDetectionStatus.Detected && result.corners.size == 4
+        AppLogger.i(
+            "ScanDetect",
+            "status=${result.status} confidence=${"%.3f".format(Locale.US, result.confidence)} " +
+                "candidates=${result.candidateCount} processingMs=${result.processingMs} input=${bitmap.width}x${bitmap.height} " +
+                "reason=${result.reason ?: "none"}",
+        )
+        navFlow.value = current.copy(
+            cropPoints = if (accepted) result.corners else defaultCropPoints(),
+            autoCropPoints = if (accepted) result.corners else emptyList(),
+            cropPreset = if (accepted) "Auto" else "Original",
+            detectionStatus = result.status,
+            detectionConfidence = result.confidence,
+            detectionProcessingMs = result.processingMs,
+            captureMessage = if (accepted) tr(settingsFlow.value, "Document edges detected.", "已识别文档边缘") else tr(settingsFlow.value, "Document edges were unclear. Adjust the corners manually.", "文档边缘不清晰，请手动调整四角"),
+        )
+    }
+
+    fun redetectDocument() {
+        val bitmap = navFlow.value.processedBitmap ?: navFlow.value.scanBitmap ?: return
+        viewModelScope.launch { detectForCrop(bitmap) }
     }
 
     fun toEdit() {
@@ -728,24 +1004,41 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
     fun setCropPoint(index: Int, point: Offset) {
         val points = navFlow.value.cropPoints.toMutableList()
         if (index in points.indices) {
+            detectionRequestId++
             points[index] = Offset(point.x.coerceIn(0f, 1f), point.y.coerceIn(0f, 1f))
-            navFlow.value = navFlow.value.copy(cropPoints = points)
+            navFlow.value = navFlow.value.copy(cropPoints = points, cropPreset = "Custom", detectionStatus = DocumentDetectionStatus.Idle)
         }
     }
 
     fun setCropPoints(points: List<Offset>) {
         if (points.size >= 4) {
-            navFlow.value = navFlow.value.copy(cropPoints = points.take(4).map { it.coerceCropPoint() })
+            detectionRequestId++
+            navFlow.value = navFlow.value.copy(
+                cropPoints = points.take(4).map { it.coerceCropPoint() },
+                cropPreset = "Custom",
+                detectionStatus = DocumentDetectionStatus.Idle,
+            )
         }
     }
 
     fun setCropPreset(label: String) {
+        if (label == "Auto") {
+            val auto = navFlow.value.autoCropPoints
+            if (auto.size == 4) {
+                detectionRequestId++
+                navFlow.value = navFlow.value.copy(cropPreset = "Auto", cropPoints = auto, detectionStatus = DocumentDetectionStatus.Detected)
+            } else {
+                redetectDocument()
+            }
+            return
+        }
         val ratio = when (label) {
             "A4" -> 210f / 297f
             "Letter" -> 8.5f / 11f
             "Legal" -> 8.5f / 14f
             else -> null
         }
+        detectionRequestId++
         navFlow.value = navFlow.value.copy(cropPreset = label, cropPoints = ratio?.let { centeredCropRatio(it) } ?: defaultCropPoints())
     }
 
@@ -760,19 +1053,51 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
                     val workingBitmap = sourcePath
                         ?.let { ImageProcessor.decodeCameraBitmap(it, maxDimension = 3072) }
                         ?: previewBitmap
-                    ImageProcessor.enhanceDocument(ImageProcessor.perspectiveCrop(workingBitmap, points))
+                    val corrected = DocumentPerspectiveCorrector.crop(workingBitmap, points)
+                    if (settingsFlow.value.cameraEnhance) ImageProcessor.enhanceDocument(corrected) else corrected
                 }
             }.onFailure { AppLogger.e("Scan", "Perspective crop failed", it) }.getOrNull()
             if (cropped == null) {
                 navFlow.value = navFlow.value.copy(
                     busy = false,
-                    captureMessage = "Unable to process this photo. Please try again.",
+                    captureMessage = tr(settingsFlow.value, "Unable to process this photo. Please try again.", "无法处理此照片，请重试"),
                 )
                 return@launch
             }
             val state = navFlow.value
             val stack = if (state.backStack.lastOrNull() == Screen.Edit) state.backStack.dropLast(1) else state.backStack
             AppLogger.i("Scan", "Perspective crop completed ${cropped.width}x${cropped.height}")
+            val currentDraft = state.draftPages.getOrNull(state.currentDraftIndex)
+            if (currentDraft != null) {
+                val processedFile = File(currentDraft.originalPath).parentFile?.let { File(it, "${currentDraft.id}-processed.jpg") }
+                    ?: File(getApplication<Application>().filesDir, "${currentDraft.id}-processed.jpg")
+                withContext(Dispatchers.IO) { ImageProcessor.writeJpeg(cropped, processedFile, 90) }
+                val updatedDraft = currentDraft.copy(
+                    processedPath = processedFile.absolutePath,
+                    cropPoints = encodeCropPoints(points),
+                )
+                dao.upsertDraftPage(updatedDraft)
+                val updatedPages = state.draftPages.toMutableList().also { it[state.currentDraftIndex] = updatedDraft }
+                val nextIndex = state.currentDraftIndex + 1
+                if (nextIndex < updatedPages.size) {
+                    navFlow.value = state.copy(draftPages = updatedPages, busy = false)
+                    openDraftPage(updatedPages[nextIndex], nextIndex)
+                    return@launch
+                }
+                navFlow.value = state.copy(
+                    screen = Screen.Edit,
+                    draftPages = updatedPages,
+                    processedBitmap = cropped,
+                    scanBitmap = cropped,
+                    scanSourcePath = null,
+                    cropPoints = defaultCropPoints(),
+                    autoCropPoints = emptyList(),
+                    detectionStatus = DocumentDetectionStatus.Idle,
+                    detectionConfidence = 0f,
+                    busy = false,
+                )
+                return@launch
+            }
             navFlow.value = state.copy(
                 screen = Screen.Edit,
                 backStack = stack,
@@ -780,6 +1105,9 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
                 scanBitmap = cropped,
                 scanSourcePath = null,
                 cropPoints = defaultCropPoints(),
+                autoCropPoints = emptyList(),
+                detectionStatus = DocumentDetectionStatus.Idle,
+                detectionConfidence = 0f,
                 busy = false,
             )
         }
@@ -811,10 +1139,14 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun applyFilter(filter: String) {
-        val base = navFlow.value.scanBitmap ?: navFlow.value.processedBitmap ?: return
+        val base = navFlow.value.processedBitmap ?: navFlow.value.scanBitmap ?: return
         val state = navFlow.value
         val stack = if (state.backStack.lastOrNull() == Screen.Edit) state.backStack.dropLast(1) else state.backStack
-        navFlow.value = state.copy(screen = Screen.Edit, backStack = stack, processedBitmap = ImageProcessor.filter(base, filter))
+        navFlow.value = state.copy(busy = true, selectedFilter = filter)
+        viewModelScope.launch {
+            val filtered = withContext(Dispatchers.Default) { ImageProcessor.filter(base, filter) }
+            navFlow.value = navFlow.value.copy(screen = Screen.Edit, backStack = stack, processedBitmap = filtered, busy = false)
+        }
     }
 
     fun applyAdjust(brightness: Float, contrast: Float, saturation: Float) {
@@ -826,20 +1158,26 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun saveDocument(title: String, type: String, quality: String) {
         val bitmap = navFlow.value.processedBitmap ?: navFlow.value.scanBitmap ?: return
+        val stateAtSave = navFlow.value
         AppLogger.i("Document", "Save document title=$title type=$type quality=$quality bitmap=${bitmap.width}x${bitmap.height}")
         viewModelScope.launch {
             navFlow.value = navFlow.value.copy(busy = true)
             val saved = withContext(Dispatchers.IO) {
                 val id = System.currentTimeMillis()
                 val files = saveDirectory()
+                val sessionBitmaps = stateAtSave.draftPages.mapNotNull { page ->
+                    ImageProcessor.readBitmap(page.processedPath.ifBlank { page.originalPath }, 4096)
+                }.toMutableList()
+                if (sessionBitmaps.isNotEmpty()) sessionBitmaps[sessionBitmaps.lastIndex] = bitmap
+                val pageBitmaps = sessionBitmaps.ifEmpty { mutableListOf(bitmap) }
                 val imageFile = File(files, "$id-page.jpg")
-                ImageProcessor.writeJpeg(bitmap, imageFile, quality)
+                ImageProcessor.writeJpeg(pageBitmaps.first(), imageFile, quality)
                 val export = if (type == "PDF") {
                     val pdf = File(files, "$id.pdf")
-                    ImageProcessor.writePdf(bitmap, pdf)
+                    ImageProcessor.writePdf(pageBitmaps, pdf)
                     pdf
                 } else {
-                    File(files, "$id.jpg").also { ImageProcessor.writeJpeg(bitmap, it, quality) }
+                    File(files, "$id.jpg").also { ImageProcessor.writeJpeg(pageBitmaps.first(), it, quality) }
                 }
                 val doc = Document(
                     id = id,
@@ -847,14 +1185,40 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
                     type = type,
                     createdAt = id,
                     sizeBytes = export.length(),
-                    pageCount = 1,
+                    pageCount = pageBitmaps.size,
                     thumbnailPath = imageFile.absolutePath,
                     exportPath = export.absolutePath,
+                    folderId = stateAtSave.currentFolderId,
+                    scanMode = stateAtSave.scanMode.name,
                 )
                 dao.upsert(doc)
-                dao.upsertPage(
-                    ScanPage(id, id, imageFile.absolutePath, imageFile.absolutePath, "auto", "Auto", 0f, 1f, 1f, 0)
-                )
+                pageBitmaps.forEachIndexed { index, pageBitmap ->
+                    val pageFile = File(files, "$id-page-$index.jpg")
+                    ImageProcessor.writeJpeg(pageBitmap, pageFile, quality)
+                    val draft = stateAtSave.draftPages.getOrNull(index)
+                    dao.upsertPage(
+                        ScanPage(
+                            id = id + index,
+                            documentId = id,
+                            originalPath = draft?.originalPath ?: pageFile.absolutePath,
+                            processedPath = pageFile.absolutePath,
+                            cropPoints = draft?.cropPoints ?: "auto",
+                            filter = "Auto",
+                            brightness = 0f,
+                            contrast = 1f,
+                            saturation = 1f,
+                            rotation = draft?.rotation ?: 0,
+                            pageIndex = index,
+                            sourceType = stateAtSave.scanMode.name,
+                            originalWidth = pageBitmap.width,
+                            originalHeight = pageBitmap.height,
+                        )
+                    )
+                }
+                stateAtSave.scanSessionId?.let { sessionId ->
+                    dao.deleteDraftPages(sessionId)
+                    dao.deleteSession(sessionId)
+                }
                 AppLogger.i("Document", "Saved document id=$id export=${export.absolutePath} size=${export.length()}")
                 doc
             }
@@ -865,6 +1229,8 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
                 selected = saved,
                 tab = Tab.Docs,
                 savedResultDetail = true,
+                draftPages = emptyList(),
+                scanSessionId = null,
             )
         }
     }
@@ -880,6 +1246,15 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             processedBitmap = bitmap,
             savedResultDetail = false,
             )
+        }
+    }
+
+    suspend fun loadDocumentPages(document: Document): List<Bitmap> = withContext(Dispatchers.IO) {
+        if (document.type == "PDF") {
+            ImageProcessor.renderPdfPages(document.exportPath, maxPages = 100)
+        } else {
+            val stored = dao.pages(document.id).mapNotNull { page -> ImageProcessor.readBitmap(page.processedPath.ifBlank { page.originalPath }, 3072) }
+            stored.ifEmpty { listOfNotNull(ImageProcessor.readBitmap(document.exportPath, 3072) ?: ImageProcessor.readBitmap(document.thumbnailPath, 3072)) }
         }
     }
 
@@ -938,13 +1313,55 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun clearLogs() {
         AppLogger.clear()
-        navFlow.value = navFlow.value.copy(logText = AppLogger.read(), captureMessage = "Logs cleared")
+        navFlow.value = navFlow.value.copy(logText = AppLogger.read(), captureMessage = tr(settingsFlow.value, "Logs cleared", "日志已清空"))
     }
 
     fun updateSettings(settings: AppSettings) {
         AppLogger.i("Settings", "Update settings language=${settings.language} theme=${settings.theme} path=${settings.defaultSavePath}")
         settingsFlow.value = settings
         saveSettings(settings)
+        GitHubUpdateRepository.schedule(getApplication(), settings.autoCheckUpdates, settings.wifiOnlyUpdates)
+    }
+
+    fun checkForUpdates(downloadAutomatically: Boolean = false) {
+        viewModelScope.launch {
+            navFlow.value = navFlow.value.copy(checkingUpdate = true, captureMessage = null)
+            val result = runCatching { GitHubUpdateRepository(getApplication()).checkLatest() }
+            val info = result.getOrNull()
+            navFlow.value = navFlow.value.copy(
+                checkingUpdate = false,
+                updateInfo = info,
+                captureMessage = when {
+                    result.isFailure -> if (settingsFlow.value.language == "中文") "检查更新失败：${result.exceptionOrNull()?.message}" else "Update check failed: ${result.exceptionOrNull()?.message}"
+                    info == null -> if (settingsFlow.value.language == "中文") "当前已是最新版本" else "ClearScan is up to date"
+                    else -> if (settingsFlow.value.language == "中文") "发现新版本 ${info.version}" else "Version ${info.version} is available"
+                },
+            )
+            if (info != null && (downloadAutomatically || settingsFlow.value.autoDownloadUpdates)) downloadUpdate(info)
+        }
+    }
+
+    fun downloadUpdate(requestedInfo: UpdateInfo? = navFlow.value.updateInfo) {
+        val info = requestedInfo ?: return
+        viewModelScope.launch {
+            navFlow.value = navFlow.value.copy(updateDownload = UpdateDownloadState("downloading", total = info.sizeBytes))
+            val result = runCatching {
+                GitHubUpdateRepository(getApplication()).download(info) { downloaded, total ->
+                    navFlow.value = navFlow.value.copy(updateDownload = UpdateDownloadState("downloading", downloaded, total))
+                }
+            }
+            val file = result.getOrNull()
+            navFlow.value = navFlow.value.copy(
+                updateDownload = if (file != null) UpdateDownloadState("ready", file.length(), file.length(), file.absolutePath) else UpdateDownloadState("error", error = result.exceptionOrNull()?.message),
+                captureMessage = result.exceptionOrNull()?.message,
+            )
+        }
+    }
+
+    fun installDownloadedUpdate() {
+        val file = navFlow.value.updateDownload.filePath?.let(::File) ?: return
+        runCatching { GitHubUpdateRepository(getApplication()).install(file) }
+            .onFailure { navFlow.value = navFlow.value.copy(captureMessage = it.message) }
     }
 
     fun login(name: String, email: String) {
@@ -955,14 +1372,14 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             accountEmail = email.ifBlank { "user@clearscan.local" },
         )
         saveSettings(settingsFlow.value)
-        navFlow.value = navFlow.value.copy(captureMessage = "Signed in")
+        navFlow.value = navFlow.value.copy(captureMessage = tr(settingsFlow.value, "Signed in", "登录成功"))
     }
 
     fun logout() {
         AppLogger.i("Account", "Logout")
         settingsFlow.value = settingsFlow.value.copy(loggedIn = false, accountName = "Guest", accountEmail = "")
         saveSettings(settingsFlow.value)
-        navFlow.value = navFlow.value.copy(screen = Screen.Shell, tab = Tab.Me, selected = null, backStack = emptyList(), captureMessage = "Logged out")
+        navFlow.value = navFlow.value.copy(screen = Screen.Shell, tab = Tab.Me, selected = null, backStack = emptyList(), captureMessage = tr(settingsFlow.value, "Logged out", "已退出登录"))
     }
 
     fun setDocumentPassword(documentId: Long, password: String) {
@@ -970,14 +1387,15 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
         val current = settingsFlow.value.passwordMap
         settingsFlow.value = settingsFlow.value.copy(passwordMap = if (password.isBlank()) current - documentId else current + (documentId to password))
         saveSettings(settingsFlow.value)
-        navFlow.value = navFlow.value.copy(captureMessage = if (password.isBlank()) "Password removed" else "Password set")
+        navFlow.value = navFlow.value.copy(captureMessage = if (password.isBlank()) tr(settingsFlow.value, "Password removed", "密码已移除") else tr(settingsFlow.value, "Password set", "密码已设置"))
     }
 
     fun runTool(name: String) {
         AppLogger.i("Tool", "Run tool entry $name")
         when (name) {
-            "ID Card Scan" -> openCamera()
+            "ID Card Scan" -> startScanMode(ScanMode.IdCard)
             "QR Code Scan" -> openQrScanner()
+            "Barcode Scan" -> startScanMode(ScanMode.Barcode)
             "Translate" -> openTranslate()
             else -> beginTool(name)
         }
@@ -1343,6 +1761,15 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             navFlow.value = state.copy(captureMessage = selectionHint(tool, settingsFlow.value))
             return
         }
+        if (tool == "Watermark" || tool == "Add Signature") {
+            val document = allDocuments.firstOrNull { it.id in selectedIds }
+            if (document != null) {
+                replace(if (tool == "Watermark") Screen.WatermarkEditor else Screen.SignatureEditor) {
+                    copy(selected = document, busy = false, captureMessage = null)
+                }
+            }
+            return
+        }
         viewModelScope.launch {
             val selected = allDocuments.filter { it.id in selectedIds }
             if (selected.size < minSelectionFor(tool)) {
@@ -1372,6 +1799,38 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
                 AppLogger.w("Tool", "$tool failed")
                 navFlow.value = navFlow.value.copy(busy = false, captureMessage = if (settingsFlow.value.language == "中文") "${toolLabel(tool, settingsFlow.value)} 失败，请选择有效文件。" else "$tool failed. Please choose a valid file.")
             }
+        }
+    }
+
+    fun applyWatermark(document: Document, options: WatermarkOptions) {
+        viewModelScope.launch {
+            navFlow.value = navFlow.value.copy(busy = true)
+            val result = withContext(Dispatchers.IO) {
+                val pages = loadDocumentPages(document)
+                val output = pages.mapIndexed { index, bitmap -> if (index == 0 || options.applyAllPages) OverlayRenderer.watermark(bitmap, options) else bitmap }
+                if (output.isEmpty()) null else writeDocumentFiles("${document.title} - Watermark", document.type, output.first(), "High", output.size, if (document.type == "PDF") output else null)
+            }
+            finishOverlayResult(result, "Watermark")
+        }
+    }
+
+    fun applySignature(document: Document, options: SignatureOptions) {
+        viewModelScope.launch {
+            navFlow.value = navFlow.value.copy(busy = true)
+            val result = withContext(Dispatchers.IO) {
+                val pages = loadDocumentPages(document)
+                val output = pages.mapIndexed { index, bitmap -> if (index == 0 || options.applyAllPages) OverlayRenderer.signature(bitmap, options) else bitmap }
+                if (output.isEmpty()) null else writeDocumentFiles("${document.title} - Signed", document.type, output.first(), "High", output.size, if (document.type == "PDF") output else null)
+            }
+            finishOverlayResult(result, "Signature")
+        }
+    }
+
+    private fun finishOverlayResult(result: Document?, label: String) {
+        if (result == null) {
+            navFlow.value = navFlow.value.copy(busy = false, captureMessage = tr(settingsFlow.value, "$label failed", "操作失败"))
+        } else {
+            replace(Screen.Detail) { copy(busy = false, selected = result, tab = Tab.Docs, activeTool = null, selectedToolIds = emptySet()) }
         }
     }
 
@@ -1487,6 +1946,12 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             accountEmail = prefs.getString("accountEmail", "") ?: "",
             passwordMap = passwords,
             defaultSavePath = prefs.getString("defaultSavePath", "Internal Storage") ?: "Internal Storage",
+            autoCheckUpdates = prefs.getBoolean("autoCheckUpdates", true),
+            autoDownloadUpdates = prefs.getBoolean("autoDownloadUpdates", true),
+            wifiOnlyUpdates = prefs.getBoolean("wifiOnlyUpdates", true),
+            cameraGrid = prefs.getBoolean("cameraGrid", false),
+            cameraEnhance = prefs.getBoolean("cameraEnhance", true),
+            cameraResolution = prefs.getString("cameraResolution", "Balanced") ?: "Balanced",
         )
     }
 
@@ -1498,8 +1963,15 @@ class ClearScanViewModel(application: Application) : AndroidViewModel(applicatio
             .putString("accountName", settings.accountName)
             .putString("accountEmail", settings.accountEmail)
             .putString("defaultSavePath", settings.defaultSavePath)
+            .putBoolean("autoCheckUpdates", settings.autoCheckUpdates)
+            .putBoolean("autoDownloadUpdates", settings.autoDownloadUpdates)
+            .putBoolean("wifiOnlyUpdates", settings.wifiOnlyUpdates)
+            .putBoolean("cameraGrid", settings.cameraGrid)
+            .putBoolean("cameraEnhance", settings.cameraEnhance)
+            .putString("cameraResolution", settings.cameraResolution)
             .putString("passwords", settings.passwordMap.entries.joinToString("|") { "${it.key}:${it.value}" })
             .apply()
+        viewModelScope.launch(Dispatchers.IO) { settingsRepository.save(settings) }
     }
 
     private suspend fun seedIfEmpty() {
@@ -1566,10 +2038,12 @@ fun ClearScanApp(model: ClearScanViewModel) {
                         Screen.Detail -> DetailScreen(state, model)
                         Screen.Share -> ShareScreen(state, model)
                         Screen.ToolSelect -> ToolSelectScreen(state, model)
+                        Screen.WatermarkEditor -> WatermarkEditorScreen(state, model)
+                        Screen.SignatureEditor -> SignatureEditorScreen(state, model)
                         Screen.Translate -> TranslateScreen(state, model)
                         Screen.Settings -> SettingsScreen(state, model)
                         Screen.Account -> AccountScreen(state, model)
-                        Screen.Help -> HelpScreen(model)
+                        Screen.Help -> HelpScreen(state, model)
                         Screen.About -> AboutScreen(state, model)
                         Screen.Legal -> LegalScreen(state, model)
                         Screen.AppLogs -> AppLogsScreen(state, model)
@@ -1687,6 +2161,11 @@ fun HomeScreen(state: UiState, model: ClearScanViewModel) {
             }
         }
         item { HeroCard(settings) }
+        if (state.draftPages.isNotEmpty()) item {
+            OutlinedButton(model::resumeScanSession, Modifier.fillMaxWidth().height(54.dp)) {
+                Text(tr(settings, "Resume ${state.draftPages.size}-page scan", "继续 ${state.draftPages.size} 页扫描"), fontWeight = FontWeight.Bold)
+            }
+        }
         item {
             Button(
                 onClick = model::openCamera,
@@ -1702,7 +2181,7 @@ fun HomeScreen(state: UiState, model: ClearScanViewModel) {
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 QuickAction(tr(settings, "Import Images", "导入图片"), Icons.Default.Image, Modifier.weight(1f)) { model.openCamera() }
-                QuickAction(tr(settings, "ID Card Scan", "证件扫描"), Icons.Outlined.Badge, Modifier.weight(1f)) { model.openCamera() }
+                QuickAction(tr(settings, "ID Card Scan", "证件扫描"), Icons.Outlined.Badge, Modifier.weight(1f)) { model.startScanMode(ScanMode.IdCard) }
             }
         }
         item {
@@ -1808,6 +2287,13 @@ fun Thumbnail(path: String, modifier: Modifier = Modifier) {
 
 @Composable
 fun DocsScreen(state: UiState, model: ClearScanViewModel) {
+    var newFolderOpen by remember { mutableStateOf(false) }
+    var newFolderName by remember { mutableStateOf("") }
+    var folderAction by remember { mutableStateOf<FolderEntity?>(null) }
+    var folderActionName by remember { mutableStateOf("") }
+    val settings = state.settings
+    val currentFolder = state.folders.firstOrNull { it.id == state.currentFolderId }
+    val childFolders = state.folders.filter { it.parentId == state.currentFolderId }
     LazyColumn(
         Modifier.fillMaxSize().statusBarsPadding(),
         contentPadding = PaddingValues(start = 22.dp, end = 22.dp, top = 20.dp, bottom = 122.dp),
@@ -1815,23 +2301,41 @@ fun DocsScreen(state: UiState, model: ClearScanViewModel) {
     ) {
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("My Docs⌄", fontSize = 30.sp, fontWeight = FontWeight.ExtraBold)
+                Text(currentFolder?.name ?: tr(settings, "My Docs", "我的文档"), fontSize = 28.sp, fontWeight = FontWeight.ExtraBold)
                 Row {
-                    IconButton(onClick = {}) { Icon(Icons.Default.Search, null) }
-                    IconButton(onClick = {}) { Icon(Icons.Default.MoreVert, null) }
+                    IconButton(onClick = { newFolderOpen = true }) { Icon(Icons.Default.CreateNewFolder, null) }
+                    if (currentFolder != null) IconButton(onClick = { model.openFolder(currentFolder.parentId) }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) }
                 }
             }
+        }
+        if (currentFolder != null) item {
+            Text(
+                tr(settings, "My Docs / ${folderBreadcrumb(state.folders, currentFolder.id)}", "我的文档 / ${folderBreadcrumb(state.folders, currentFolder.id)}"),
+                color = Muted,
+                fontSize = 13.sp,
+            )
         }
         item {
             OutlinedTextField(
                 value = state.query,
                 onValueChange = model::setQuery,
-                placeholder = { Text("Search documents") },
+                placeholder = { Text(tr(settings, "Search all documents", "搜索全部文档")) },
                 leadingIcon = { Icon(Icons.Default.Search, null) },
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(18.dp),
                 singleLine = true,
             )
+        }
+        items(childFolders, key = { "folder-${it.id}" }) { folder ->
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { model.openFolder(folder.id) }.padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Default.Folder, null, tint = Teal, modifier = Modifier.size(34.dp))
+                Spacer(Modifier.width(14.dp))
+                Text(folder.name, Modifier.weight(1f), fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                IconButton(onClick = { folderAction = folder; folderActionName = folder.name }) { Icon(Icons.Default.MoreVert, null, tint = Muted) }
+            }
         }
         items(state.documents, key = { it.id }) { doc -> DocumentRow(doc, model) }
     }
@@ -1840,18 +2344,80 @@ fun DocsScreen(state: UiState, model: ClearScanViewModel) {
             Icon(Icons.Default.CameraAlt, null, tint = ComposeColor.White, modifier = Modifier.size(34.dp))
         }
     }
+    if (newFolderOpen) AlertDialog(
+        onDismissRequest = { newFolderOpen = false },
+        title = { Text(tr(settings, "New folder", "新建文件夹")) },
+        text = { OutlinedTextField(newFolderName, { newFolderName = it }, singleLine = true, label = { Text(tr(settings, "Folder name", "文件夹名称")) }) },
+        confirmButton = { TextButton(onClick = { model.createFolder(newFolderName); newFolderOpen = false; newFolderName = "" }) { Text(tr(settings, "Create", "创建")) } },
+        dismissButton = { TextButton(onClick = { newFolderOpen = false }) { Text(tr(settings, "Cancel", "取消")) } },
+    )
+    folderAction?.let { folder ->
+        AlertDialog(
+            onDismissRequest = { folderAction = null },
+            title = { Text(tr(settings, "Folder options", "文件夹选项")) },
+            text = { OutlinedTextField(folderActionName, { folderActionName = it }, singleLine = true, label = { Text(tr(settings, "Folder name", "文件夹名称")) }) },
+            confirmButton = { TextButton(onClick = { model.renameFolder(folder, folderActionName); folderAction = null }) { Text(tr(settings, "Rename", "重命名")) } },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { model.deleteFolder(folder); folderAction = null }) { Text(tr(settings, "Delete", "删除"), color = ComposeColor(0xFFE53935)) }
+                    TextButton(onClick = { folderAction = null }) { Text(tr(settings, "Cancel", "取消")) }
+                }
+            },
+        )
+    }
+}
+
+fun folderBreadcrumb(folders: List<FolderEntity>, folderId: Long?): String {
+    val byId = folders.associateBy { it.id }
+    val names = mutableListOf<String>()
+    val visited = mutableSetOf<Long>()
+    var current = folderId
+    while (current != null && visited.add(current)) {
+        val folder = byId[current] ?: break
+        names += folder.name
+        current = folder.parentId
+    }
+    return names.asReversed().joinToString(" / ")
+}
+
+fun canMoveFolder(folders: List<FolderEntity>, folderId: Long, targetParentId: Long?): Boolean {
+    if (targetParentId == null) return true
+    if (folderId == targetParentId) return false
+    val byId = folders.associateBy { it.id }
+    val visited = mutableSetOf<Long>()
+    var current: Long? = targetParentId
+    while (current != null && visited.add(current)) {
+        if (current == folderId) return false
+        current = byId[current]?.parentId
+    }
+    return true
 }
 
 @Composable
 fun CameraScreen(state: UiState, model: ClearScanViewModel) {
     val context = LocalContext.current
     val settings = state.settings
-    val imageCapture = remember {
+    val imageCapture = remember(settings.cameraResolution) {
         ImageCapture.Builder()
             .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+            .setCaptureMode(if (settings.cameraResolution == "High") ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY else ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
             .build()
     }
+    var boundCamera by remember { mutableStateOf<Camera?>(null) }
+    var lensFacing by remember { mutableStateOf(CameraSelector.LENS_FACING_BACK) }
+    var flashMode by remember { mutableStateOf(ImageCapture.FLASH_MODE_AUTO) }
+    var settingsOpen by remember { mutableStateOf(false) }
+    var pendingMode by remember { mutableStateOf<ScanMode?>(null) }
+    val analyzer = remember(state.scanMode) {
+        when (state.scanMode) {
+            ScanMode.QrCode, ScanMode.Barcode -> BarcodeAnalyzer(state.scanMode, model::onCodeDetected)
+            ScanMode.Document, ScanMode.Book, ScanMode.IdCard -> DocumentFrameAnalyzer(detectionProfileFor(state.scanMode), model::onLiveDocumentFrame)
+        }
+    }
+    val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
+    DisposableEffect(analyzer) { onDispose { (analyzer as? BarcodeAnalyzer)?.close() } }
+    DisposableEffect(Unit) { onDispose { analysisExecutor.shutdownNow() } }
+    imageCapture.flashMode = flashMode
     var hasCameraPermission by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
     }
@@ -1860,27 +2426,59 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
     }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         hasCameraPermission = granted
-        if (!granted) Toast.makeText(context, "Camera permission is needed to scan.", Toast.LENGTH_SHORT).show()
+        if (!granted) Toast.makeText(context, tr(settings, "Camera permission is needed to scan.", "扫描需要相机权限"), Toast.LENGTH_SHORT).show()
     }
     Column(Modifier.fillMaxSize().background(ComposeColor.Black).statusBarsPadding()) {
         Row(Modifier.fillMaxWidth().height(64.dp).padding(horizontal = 14.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = model::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = ComposeColor.White) }
-            Icon(Icons.Default.AutoAwesome, null, tint = ComposeColor.White)
-            Icon(Icons.Default.CameraAlt, null, tint = ComposeColor.White)
-            Icon(Icons.Default.Settings, null, tint = ComposeColor.White)
+            IconButton(
+                enabled = boundCamera?.cameraInfo?.hasFlashUnit() == true,
+                onClick = {
+                    flashMode = when (flashMode) {
+                        ImageCapture.FLASH_MODE_AUTO -> ImageCapture.FLASH_MODE_ON
+                        ImageCapture.FLASH_MODE_ON -> ImageCapture.FLASH_MODE_OFF
+                        else -> ImageCapture.FLASH_MODE_AUTO
+                    }
+                },
+            ) {
+                Icon(
+                    when (flashMode) {
+                        ImageCapture.FLASH_MODE_ON -> Icons.Default.FlashOn
+                        ImageCapture.FLASH_MODE_OFF -> Icons.Default.FlashOff
+                        else -> Icons.Default.FlashAuto
+                    },
+                    null,
+                    tint = if (boundCamera?.cameraInfo?.hasFlashUnit() == true) ComposeColor.White else Muted,
+                )
+            }
+            IconButton(onClick = { lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK }) {
+                Icon(Icons.Default.Cameraswitch, null, tint = ComposeColor.White)
+            }
+            IconButton(onClick = { settingsOpen = true }) { Icon(Icons.Default.Settings, null, tint = ComposeColor.White) }
         }
         Box(Modifier.weight(1f).fillMaxWidth().background(ComposeColor(0xFF6E4E32)), contentAlignment = Alignment.Center) {
             if (hasCameraPermission) {
-                CameraPreview(imageCapture = imageCapture, modifier = Modifier.fillMaxSize())
-                Canvas(Modifier.fillMaxWidth(.78f).aspectRatio(.72f)) {
-                    drawRect(Teal, style = Stroke(width = 4f))
-                    val handle = 40f
-                    listOf(
-                        Offset.Zero to Size(handle, handle),
-                        Offset(size.width - handle, 0f) to Size(handle, handle),
-                        Offset(0f, size.height - handle) to Size(handle, handle),
-                        Offset(size.width - handle, size.height - handle) to Size(handle, handle),
-                    ).forEach { (offset, size) -> drawRect(Teal, offset, size, style = Stroke(width = 9f)) }
+                key(lensFacing, state.scanMode) {
+                    CameraPreview(
+                        imageCapture = imageCapture,
+                        lensFacing = lensFacing,
+                        analyzer = analyzer,
+                        analysisExecutor = analysisExecutor,
+                        settings = settings,
+                        onCameraBound = { boundCamera = it },
+                        onCameraError = { if (lensFacing != CameraSelector.LENS_FACING_BACK) lensFacing = CameraSelector.LENS_FACING_BACK },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+                if (state.settings.cameraGrid) Canvas(Modifier.fillMaxSize()) {
+                    val color = ComposeColor.White.copy(alpha = .42f)
+                    drawLine(color, Offset(size.width / 3f, 0f), Offset(size.width / 3f, size.height), 1.5f)
+                    drawLine(color, Offset(size.width * 2f / 3f, 0f), Offset(size.width * 2f / 3f, size.height), 1.5f)
+                    drawLine(color, Offset(0f, size.height / 3f), Offset(size.width, size.height / 3f), 1.5f)
+                    drawLine(color, Offset(0f, size.height * 2f / 3f), Offset(size.width, size.height * 2f / 3f), 1.5f)
+                }
+                if (state.scanMode in listOf(ScanMode.Document, ScanMode.Book, ScanMode.IdCard)) {
+                    LiveDocumentGuide(state.liveDocumentFrame, Modifier.fillMaxSize())
                 }
             } else {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1890,38 +2488,132 @@ fun CameraScreen(state: UiState, model: ClearScanViewModel) {
                 }
             }
             if (state.captureMessage != null) {
-                Text(tr(settings, "Capturing...\nPlease hold steady", "正在拍摄...\n请保持稳定"), color = ComposeColor.White, textAlign = TextAlign.Center, modifier = Modifier.clip(RoundedCornerShape(10.dp)).background(ComposeColor(0x99000000)).padding(16.dp), fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                Text(state.captureMessage, color = ComposeColor.White, textAlign = TextAlign.Center, modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp).clip(RoundedCornerShape(8.dp)).background(ComposeColor(0x99000000)).padding(horizontal = 14.dp, vertical = 9.dp), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             }
-        }
-        Column(Modifier.fillMaxWidth().height(210.dp).background(ComposeColor.Black).padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
-                listOf(
-                    "ID Card" to tr(settings, "ID Card", "证件"),
-                    "Document" to tr(settings, "Document", "文档"),
-                    "Book" to tr(settings, "Book", "书籍"),
-                    "QR Code" to tr(settings, "QR Code", "二维码"),
-                ).forEach {
-                    Text(it.second, color = if (it.first == "Document") Teal else ComposeColor.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            state.codeResult?.let { result ->
+                Card(
+                    Modifier.align(Alignment.BottomCenter).padding(18.dp).fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = ComposeColor(0xEE15191E)),
+                    shape = RoundedCornerShape(10.dp),
+                ) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(if (state.scanMode == ScanMode.QrCode) tr(settings, "QR code found", "发现二维码") else tr(settings, "Barcode found", "发现条形码"), color = ComposeColor.White, fontWeight = FontWeight.Bold)
+                        Text(result.rawValue, color = ComposeColor.White, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton(onClick = { copyText(context, result.rawValue); model.clearCodeResult() }) { Text(tr(settings, "Copy", "复制")) }
+                            if (result.isWebUrl) TextButton(onClick = { openSafeUrl(context, result.rawValue, settings) }) { Text(tr(settings, "Open link", "打开链接")) }
+                            if (state.scanMode == ScanMode.Barcode) TextButton(onClick = { searchBarcode(context, result.rawValue) }) { Text(tr(settings, "Search", "搜索")) }
+                            TextButton(onClick = model::clearCodeResult) { Text(tr(settings, "Scan again", "继续扫描")) }
+                        }
+                    }
                 }
             }
-            Spacer(Modifier.height(22.dp))
+        }
+        Column(Modifier.fillMaxWidth().background(ComposeColor.Black).navigationBarsPadding().padding(horizontal = 14.dp, vertical = 10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
+                listOf(
+                    ScanMode.IdCard to tr(settings, "ID", "证件"),
+                    ScanMode.Document to tr(settings, "Document", "文档"),
+                    ScanMode.Book to tr(settings, "Book", "书籍"),
+                    ScanMode.QrCode to tr(settings, "QR", "二维码"),
+                    ScanMode.Barcode to tr(settings, "Data", "条码"),
+                ).forEach {
+                    val selected = it.first == state.scanMode
+                    Text(
+                        it.second,
+                        Modifier.clip(RoundedCornerShape(6.dp)).background(if (selected) Teal.copy(alpha = .18f) else ComposeColor.Transparent).clickable {
+                            if (state.draftPages.isNotEmpty() && it.first != state.scanMode) pendingMode = it.first else model.changeScanMode(it.first)
+                        }.padding(horizontal = 10.dp, vertical = 7.dp),
+                        color = if (selected) Teal else ComposeColor.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+            if (state.scanMode == ScanMode.Document) {
+                Spacer(Modifier.height(7.dp))
+                Row(Modifier.clip(RoundedCornerShape(7.dp)).background(ComposeColor(0xFF1C1C1C)).padding(3.dp)) {
+                    listOf(
+                        DocumentCaptureMode.Single to tr(settings, "Single page", "单页"),
+                        DocumentCaptureMode.Multi to tr(settings, "Multiple pages", "多页"),
+                    ).forEach { (mode, label) ->
+                        val selected = mode == state.documentCaptureMode
+                        Text(
+                            label,
+                            Modifier.clip(RoundedCornerShape(5.dp)).background(if (selected) Teal else ComposeColor.Transparent).clickable { model.changeDocumentCaptureMode(mode) }.padding(horizontal = 18.dp, vertical = 6.dp),
+                            color = ComposeColor.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround, verticalAlignment = Alignment.CenterVertically) {
                 CameraSmallButton(Icons.Default.PhotoLibrary) { pickImage.launch("image/*") }
                 Box(Modifier.size(78.dp).clip(CircleShape).background(ComposeColor.White).border(5.dp, Teal, CircleShape).clickable {
-                    if (hasCameraPermission) takeRealPhoto(context, imageCapture, model) else permission.launch(Manifest.permission.CAMERA)
+                    if (hasCameraPermission) takeRealPhoto(context, imageCapture, model, settings) else permission.launch(Manifest.permission.CAMERA)
                 }, contentAlignment = Alignment.Center) {
                     Icon(Icons.Default.CameraAlt, null, tint = Teal, modifier = Modifier.size(34.dp))
                 }
-                CameraSmallButton(Icons.Default.DocumentScanner) {
-                    if (hasCameraPermission) takeRealPhoto(context, imageCapture, model) else permission.launch(Manifest.permission.CAMERA)
+                CameraSmallButton(if (state.draftPages.isNotEmpty()) Icons.Default.Check else Icons.Default.DocumentScanner) {
+                    if (state.draftPages.isNotEmpty()) model.finishScanSession()
+                    else if (hasCameraPermission) takeRealPhoto(context, imageCapture, model, settings) else permission.launch(Manifest.permission.CAMERA)
                 }
             }
+            if (state.draftPages.isNotEmpty()) {
+                Text(
+                    tr(settings, "${state.draftPages.size} pages • tap the right button when finished", "已拍摄 ${state.draftPages.size} 页 • 完成后点击右侧按钮"),
+                    color = ComposeColor.White,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
         }
+    }
+    if (settingsOpen) AlertDialog(
+        onDismissRequest = { settingsOpen = false },
+        title = { Text(tr(settings, "Camera settings", "相机设置")) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                SettingToggle(tr(settings, "Composition grid", "构图网格"), settings.cameraGrid) { model.updateSettings(settings.copy(cameraGrid = it)) }
+                SettingToggle(tr(settings, "Automatic enhancement", "自动增强"), settings.cameraEnhance) { model.updateSettings(settings.copy(cameraEnhance = it)) }
+                Text(tr(settings, "Resolution: ${settings.cameraResolution}", "分辨率：${if (settings.cameraResolution == "Balanced") "均衡" else settings.cameraResolution}"))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("Balanced", "High").forEach { option ->
+                        OutlinedButton({ model.updateSettings(settings.copy(cameraResolution = option)) }, enabled = settings.cameraResolution != option) {
+                            Text(if (option == "High") tr(settings, "High", "高画质") else tr(settings, "Balanced", "均衡"))
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { settingsOpen = false }) { Text(tr(settings, "Done", "完成")) } },
+    )
+    pendingMode?.let { mode ->
+        AlertDialog(
+            onDismissRequest = { pendingMode = null },
+            title = { Text(tr(settings, "Switch scan mode?", "切换扫描模式？")) },
+            text = { Text(tr(settings, "The current unfinished pages will be discarded.", "当前尚未完成的页面将被丢弃。")) },
+            confirmButton = {
+                TextButton(onClick = { pendingMode = null; model.discardScanAndChangeMode(mode) }) { Text(tr(settings, "Discard and switch", "丢弃并切换")) }
+            },
+            dismissButton = { TextButton(onClick = { pendingMode = null }) { Text(tr(settings, "Cancel", "取消")) } },
+        )
     }
 }
 
 @Composable
-fun CameraPreview(imageCapture: ImageCapture, modifier: Modifier = Modifier) {
+fun CameraPreview(
+    imageCapture: ImageCapture,
+    lensFacing: Int,
+    analyzer: ImageAnalysis.Analyzer?,
+    analysisExecutor: Executor,
+    settings: AppSettings,
+    onCameraBound: (Camera) -> Unit,
+    onCameraError: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     AndroidView(
@@ -1942,15 +2634,30 @@ fun CameraPreview(imageCapture: ImageCapture, modifier: Modifier = Modifier) {
                             it.surfaceProvider = previewView.surfaceProvider
                         }
                     cameraProvider.unbindAll()
-                    cameraProvider.bindToLifecycle(
-                        lifecycleOwner,
-                        CameraSelector.DEFAULT_BACK_CAMERA,
-                        preview,
-                        imageCapture,
-                    )
+                    val selector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
+                    val useCases = mutableListOf<androidx.camera.core.UseCase>(preview, imageCapture)
+                    var analysis: ImageAnalysis? = null
+                    if (analyzer != null) {
+                        analysis = ImageAnalysis.Builder()
+                            .setTargetResolution(android.util.Size(640, 480))
+                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                            .build()
+                        analysis.setAnalyzer(analysisExecutor, analyzer)
+                        useCases += analysis
+                    }
+                    val camera = runCatching {
+                        cameraProvider.bindToLifecycle(lifecycleOwner, selector, *useCases.toTypedArray())
+                    }.getOrElse { analysisError ->
+                        AppLogger.w("Camera", "ImageAnalysis unavailable; falling back to capture-only: ${analysisError.message}")
+                        analysis?.clearAnalyzer()
+                        cameraProvider.unbindAll()
+                        cameraProvider.bindToLifecycle(lifecycleOwner, selector, preview, imageCapture)
+                    }
+                    onCameraBound(camera)
                 }.onFailure { error ->
                     AppLogger.e("Camera", "Unable to open camera", error)
-                    Toast.makeText(ctx, "Unable to open camera: ${error.message ?: "camera unavailable"}", Toast.LENGTH_SHORT).show()
+                    onCameraError()
+                    Toast.makeText(ctx, tr(settings, "Unable to open camera: ${error.message ?: "camera unavailable"}", "无法打开相机：${error.message ?: "相机不可用"}"), Toast.LENGTH_SHORT).show()
                 }
             }, ContextCompat.getMainExecutor(ctx))
             previewView
@@ -1958,7 +2665,40 @@ fun CameraPreview(imageCapture: ImageCapture, modifier: Modifier = Modifier) {
     )
 }
 
-fun takeRealPhoto(context: Context, imageCapture: ImageCapture, model: ClearScanViewModel) {
+@Composable
+private fun LiveDocumentGuide(frame: LiveDocumentFrame?, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val fallback = listOf(
+            Offset(size.width * .12f, size.height * .16f),
+            Offset(size.width * .88f, size.height * .16f),
+            Offset(size.width * .88f, size.height * .84f),
+            Offset(size.width * .12f, size.height * .84f),
+        )
+        val points = if (frame?.corners?.size == 4) {
+            val frameWidth = frame.imageAspectRatio
+            val frameHeight = 1f
+            val scale = minOf(size.width / frameWidth, size.height / frameHeight)
+            val shownWidth = frameWidth * scale
+            val shownHeight = frameHeight * scale
+            val left = (size.width - shownWidth) / 2f
+            val top = (size.height - shownHeight) / 2f
+            frame.corners.map { Offset(left + it.x * shownWidth, top + it.y * shownHeight) }
+        } else fallback
+        val color = if (frame == null) ComposeColor.White.copy(alpha = .48f) else if (frame.stable) Teal else ComposeColor(0xFFFFC857)
+        val path = Path().apply {
+            moveTo(points[0].x, points[0].y)
+            points.drop(1).forEach { lineTo(it.x, it.y) }
+            close()
+        }
+        drawPath(path, color, style = Stroke(width = if (frame?.stable == true) 6f else 4f))
+        points.forEach { point ->
+            drawCircle(ComposeColor.White, radius = 8f, center = point)
+            drawCircle(color, radius = 8f, center = point, style = Stroke(width = 4f))
+        }
+    }
+}
+
+fun takeRealPhoto(context: Context, imageCapture: ImageCapture, model: ClearScanViewModel, settings: AppSettings) {
     val outputFile = File(context.cacheDir, "clearscan-capture-${System.currentTimeMillis()}.jpg")
     outputFile.parentFile?.mkdirs()
     if (context is android.app.Activity) {
@@ -1978,13 +2718,13 @@ fun takeRealPhoto(context: Context, imageCapture: ImageCapture, model: ClearScan
 
             override fun onError(exception: ImageCaptureException) {
                 AppLogger.e("Camera", "ImageCapture failed", exception)
-                Toast.makeText(context, "Photo failed: ${exception.message}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, tr(settings, "Photo failed: ${exception.message}", "拍摄失败：${exception.message}"), Toast.LENGTH_SHORT).show()
             }
             },
         )
     }.onFailure { error ->
         AppLogger.e("Camera", "takePicture invocation failed", error)
-        Toast.makeText(context, "Photo failed: ${error.message ?: "camera not ready"}", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, tr(settings, "Photo failed: ${error.message ?: "camera not ready"}", "拍摄失败：${error.message ?: "相机未就绪"}"), Toast.LENGTH_SHORT).show()
     }
 }
 
@@ -1993,6 +2733,32 @@ fun CameraSmallButton(icon: ImageVector, onClick: () -> Unit) {
     Box(Modifier.size(50.dp).clip(RoundedCornerShape(11.dp)).background(ComposeColor(0xFF171717)).clickable(onClick = onClick), contentAlignment = Alignment.Center) {
         Icon(icon, null, tint = ComposeColor.White, modifier = Modifier.size(27.dp))
     }
+}
+
+@Composable
+fun SettingToggle(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurface)
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+fun copyText(context: Context, text: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText("ClearScan", text))
+}
+
+fun openSafeUrl(context: Context, value: String, settings: AppSettings) {
+    val uri = runCatching { Uri.parse(value) }.getOrNull() ?: return
+    if (uri.scheme?.lowercase() !in setOf("http", "https")) return
+    val intent = Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    runCatching { context.startActivity(intent) }
+        .onFailure { Toast.makeText(context, tr(settings, "No browser can open this link", "没有可打开此链接的浏览器"), Toast.LENGTH_SHORT).show() }
+}
+
+fun searchBarcode(context: Context, value: String) {
+    val uri = Uri.parse("https://www.google.com/search?q=${Uri.encode(value)}")
+    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
 }
 
 @Composable
@@ -2024,11 +2790,95 @@ fun CropScreen(state: UiState, model: ClearScanViewModel) {
                 onPointsChange = model::setCropPoints,
                 modifier = Modifier.fillMaxWidth(),
             )
+            when (state.detectionStatus) {
+                DocumentDetectionStatus.Detecting -> Surface(
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = .94f),
+                    shape = RoundedCornerShape(8.dp),
+                    shadowElevation = 3.dp,
+                ) {
+                    Row(
+                        Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Teal)
+                        Text(tr(settings, "Detecting document edges...", "正在识别文档边缘..."), fontSize = 13.sp)
+                    }
+                }
+                DocumentDetectionStatus.Detected -> Surface(
+                    modifier = Modifier.align(Alignment.TopCenter),
+                    color = Teal.copy(alpha = .94f),
+                    shape = RoundedCornerShape(8.dp),
+                ) {
+                    Text(
+                        tr(settings, "Document aligned", "文档已智能对齐") + " ${(state.detectionConfidence * 100).roundToInt()}%",
+                        Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                        color = ComposeColor.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                DocumentDetectionStatus.LowConfidence, DocumentDetectionStatus.Failed -> Surface(
+                    modifier = Modifier.align(Alignment.TopCenter).clickable { model.redetectDocument() },
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = .96f),
+                    shape = RoundedCornerShape(8.dp),
+                    shadowElevation = 2.dp,
+                ) {
+                    Row(
+                        Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(7.dp),
+                    ) {
+                        Icon(Icons.Default.AutoAwesome, null, Modifier.size(16.dp), tint = Teal)
+                        Text(tr(settings, "Edges unclear - tap to retry", "边缘不清晰，点击重新识别"), fontSize = 12.sp)
+                    }
+                }
+                else -> Unit
+            }
+        }
+        if (state.draftPages.isNotEmpty()) {
+            Text(
+                tr(settings, "Page ${state.currentDraftIndex + 1} of ${state.draftPages.size}", "第 ${state.currentDraftIndex + 1} 页，共 ${state.draftPages.size} 页"),
+                Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center,
+                color = if (dark) ComposeColor.White else MaterialTheme.colorScheme.onSurface,
+                fontSize = 13.sp,
+            )
+            LazyRow(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(state.draftPages.size, key = { state.draftPages[it].id }) { index ->
+                    val page = state.draftPages[index]
+                    var dragX by remember(page.id) { mutableFloatStateOf(0f) }
+                    Box(
+                        Modifier
+                            .size(54.dp, 70.dp)
+                            .border(if (index == state.currentDraftIndex) 3.dp else 1.dp, if (index == state.currentDraftIndex) Teal else Muted, RoundedCornerShape(5.dp))
+                            .pointerInput(page.id, index) {
+                                detectDragGestures(
+                                    onDragStart = { dragX = 0f },
+                                    onDragEnd = {
+                                        when {
+                                            dragX > 36f -> model.moveDraftPage(index, (index + 1).coerceAtMost(state.draftPages.lastIndex))
+                                            dragX < -36f -> model.moveDraftPage(index, (index - 1).coerceAtLeast(0))
+                                        }
+                                        dragX = 0f
+                                    },
+                                    onDrag = { change, amount -> change.consume(); dragX += amount.x },
+                                )
+                            }
+                            .clickable { model.selectDraftPage(index) },
+                    ) { Thumbnail(page.thumbnailPath, Modifier.fillMaxSize()) }
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                TextButton(onClick = { model.deleteCurrentDraft(false) }) { Text(tr(settings, "Delete page", "删除此页")) }
+                TextButton(onClick = { model.deleteCurrentDraft(true) }) { Text(tr(settings, "Retake", "重新拍摄")) }
+            }
         }
         LazyRow(Modifier.fillMaxWidth().padding(18.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            items(listOf("Original", "A4", "Letter", "Legal", "More")) { label ->
+            items(listOf("Auto", "Original", "A4", "Letter", "Legal", "More")) { label ->
                 val selected = state.cropPreset == label
                 val display = when (label) {
+                    "Auto" -> tr(settings, "Auto", "智能")
                     "Original" -> tr(settings, "Original", "原始")
                     "Letter" -> tr(settings, "Letter", "信纸")
                     "Legal" -> tr(settings, "Legal", "法律")
@@ -2041,7 +2891,7 @@ fun CropScreen(state: UiState, model: ClearScanViewModel) {
                     shape = RoundedCornerShape(10.dp),
                 ) {
                     Column(Modifier.size(86.dp).padding(10.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                        Icon(Icons.Default.Crop, null, tint = if (selected || dark) ComposeColor.White else Teal)
+                        Icon(if (label == "Auto") Icons.Default.AutoAwesome else Icons.Default.Crop, null, tint = if (selected || dark) ComposeColor.White else Teal)
                         Spacer(Modifier.height(8.dp))
                         Text(display, color = if (selected || dark) ComposeColor.White else MaterialTheme.colorScheme.onSurface, fontSize = 13.sp)
                     }
@@ -2072,7 +2922,17 @@ fun CropEditor(
     var canvasSize by remember { mutableStateOf(Size(1f, 1f)) }
     var selectedHandle by remember { mutableStateOf(-1) }
     LaunchedEffect(points) {
-        if (selectedHandle < 0) localPoints = points
+        if (selectedHandle < 0 && points.size == 4 && localPoints.size == 4) {
+            val start = localPoints
+            Animatable(0f).animateTo(1f, animationSpec = tween(240)) {
+                localPoints = start.zip(points) { from, to ->
+                    Offset(
+                        from.x + (to.x - from.x) * value,
+                        from.y + (to.y - from.y) * value,
+                    )
+                }
+            }
+        }
     }
     val currentPoints by rememberUpdatedState(localPoints)
     Box(
@@ -2221,12 +3081,13 @@ fun EditTool(label: String, icon: ImageVector, onClick: () -> Unit) {
 @Composable
 fun FilterScreen(state: UiState, model: ClearScanViewModel) {
     val settings = state.settings
-    val source = state.scanBitmap ?: state.processedBitmap
-    val mainSource = remember(source) { ImageProcessor.previewBitmap(source, 1600) }
-    val thumbSource = remember(source) { ImageProcessor.previewBitmap(source, 280) }
-    val filters = remember { listOf("Original", "Auto", "B&W", "Magic Color", "Gray") }
-    var selectedFilter by remember { mutableStateOf("Original") }
+    val source = state.processedBitmap ?: state.scanBitmap
+    val mainSource = remember(source) { ImageProcessor.previewBitmap(source, 1440) }
+    val thumbSource = remember(source) { ImageProcessor.previewBitmap(source, 320) }
+    val filters = remember { listOf("Original", "Auto", "Clean", "White Paper", "B&W", "Ink", "Magic Color", "Photo", "Gray", "Soft Gray", "High Contrast") }
+    var selectedFilter by remember { mutableStateOf(state.selectedFilter) }
     var mainPreview by remember(mainSource) { mutableStateOf(mainSource) }
+    var mainCache by remember(mainSource) { mutableStateOf(mapOf("Original" to mainSource)) }
     var thumbPreviews by remember(thumbSource) { mutableStateOf<Map<String, Bitmap?>>(emptyMap()) }
     LaunchedEffect(thumbSource) {
         thumbPreviews = withContext(Dispatchers.Default) {
@@ -2234,7 +3095,10 @@ fun FilterScreen(state: UiState, model: ClearScanViewModel) {
         }
     }
     LaunchedEffect(mainSource, selectedFilter) {
-        mainPreview = withContext(Dispatchers.Default) { ImageProcessor.filter(mainSource, selectedFilter) }
+        mainCache[selectedFilter]?.let { mainPreview = it; return@LaunchedEffect }
+        val generated = withContext(Dispatchers.Default) { ImageProcessor.filter(mainSource, selectedFilter) }
+        mainPreview = generated
+        mainCache = (mainCache + (selectedFilter to generated)).entries.toList().takeLast(4).associate { it.key to it.value }
     }
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
         TopBar(tr(settings, "Filter", "滤镜"), onBack = model::back, action = tr(settings, "Apply", "应用"), onAction = { model.applyFilter(selectedFilter) })
@@ -2248,11 +3112,26 @@ fun FilterScreen(state: UiState, model: ClearScanViewModel) {
                 Column(Modifier.width(92.dp).clickable { selectedFilter = filter }, horizontalAlignment = Alignment.CenterHorizontally) {
                     ScanBitmap(thumbPreviews[filter], Modifier.size(84.dp, 108.dp))
                     Spacer(Modifier.height(8.dp))
-                    Text(filter, color = if (selected) ComposeColor.White else MaterialTheme.colorScheme.onSurface, modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(if (selected) Teal.copy(alpha = chipAlpha) else ComposeColor.Transparent).padding(horizontal = 12.dp, vertical = 4.dp), fontSize = 14.sp)
+                    Text(filterLabel(settings, filter), color = if (selected) ComposeColor.White else MaterialTheme.colorScheme.onSurface, modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(if (selected) Teal.copy(alpha = chipAlpha) else ComposeColor.Transparent).padding(horizontal = 10.dp, vertical = 4.dp), fontSize = 13.sp, maxLines = 1)
                 }
             }
         }
     }
+}
+
+private fun filterLabel(settings: AppSettings, filter: String): String = when (filter) {
+    "Original" -> tr(settings, "Original", "原图")
+    "Auto" -> tr(settings, "Auto", "自动")
+    "Clean" -> tr(settings, "Clean", "净化")
+    "White Paper" -> tr(settings, "White Paper", "白纸")
+    "B&W" -> tr(settings, "B&W", "黑白")
+    "Ink" -> tr(settings, "Ink", "墨迹")
+    "Magic Color" -> tr(settings, "Magic Color", "魔法彩色")
+    "Photo" -> tr(settings, "Photo", "照片")
+    "Gray" -> tr(settings, "Gray", "灰度")
+    "Soft Gray" -> tr(settings, "Soft Gray", "柔和灰度")
+    "High Contrast" -> tr(settings, "High Contrast", "高对比")
+    else -> filter
 }
 
 @Composable
@@ -2365,6 +3244,7 @@ fun DetailScreen(state: UiState, model: ClearScanViewModel) {
     val context = LocalContext.current
     var renameOpen by remember { mutableStateOf(false) }
     var passwordOpen by remember { mutableStateOf(false) }
+    var moveOpen by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
         Row(Modifier.fillMaxWidth().height(82.dp).padding(horizontal = 18.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = model::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) }
@@ -2375,37 +3255,45 @@ fun DetailScreen(state: UiState, model: ClearScanViewModel) {
             IconButton(onClick = { renameOpen = true }) { Icon(Icons.Default.Edit, null) }
         }
         Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp, vertical = 14.dp), contentAlignment = Alignment.Center) {
-            DocumentPreviewPages(doc)
+            DocumentPreviewPages(doc, state.settings, model)
         }
         Row(Modifier.fillMaxWidth().height(104.dp).navigationBarsPadding(), horizontalArrangement = Arrangement.SpaceAround, verticalAlignment = Alignment.CenterVertically) {
-            EditTool("Share", Icons.Default.Share, model::shareSelected)
-            EditTool("Edit", Icons.Default.Edit) { model.toEdit() }
-            EditTool("Print", Icons.Default.Print) { printDocument(context, doc) }
-            EditTool(if (state.settings.passwordMap.containsKey(doc.id)) "Locked" else "Password", Icons.Default.Lock) { passwordOpen = true }
-            EditTool("Delete", Icons.Default.Delete, model::deleteSelected)
+            EditTool(tr(state.settings, "Share", "分享"), Icons.Default.Share, model::shareSelected)
+            EditTool(tr(state.settings, "Edit", "编辑"), Icons.Default.Edit) { model.toEdit() }
+            EditTool(tr(state.settings, "Print", "打印"), Icons.Default.Print) { printDocument(context, doc) }
+            EditTool(if (state.settings.passwordMap.containsKey(doc.id)) tr(state.settings, "Locked", "已锁定") else tr(state.settings, "Password", "密码"), Icons.Default.Lock) { passwordOpen = true }
+            EditTool(tr(state.settings, "Delete", "删除"), Icons.Default.Delete, model::deleteSelected)
         }
+        TextButton(onClick = { moveOpen = true }, modifier = Modifier.align(Alignment.CenterHorizontally)) { Text(tr(state.settings, "Move to folder", "移动到文件夹")) }
     }
-    if (renameOpen) RenameDialog(doc.title, onDismiss = { renameOpen = false }, onRename = { model.renameSelected(it); renameOpen = false })
+    if (renameOpen) RenameDialog(state.settings, doc.title, onDismiss = { renameOpen = false }, onRename = { model.renameSelected(it); renameOpen = false })
     if (passwordOpen) PasswordDialog(
-        hasPassword = state.settings.passwordMap.containsKey(doc.id),
+        settings = state.settings, hasPassword = state.settings.passwordMap.containsKey(doc.id),
         onDismiss = { passwordOpen = false },
         onSave = { model.setDocumentPassword(doc.id, it); passwordOpen = false },
+    )
+    if (moveOpen) AlertDialog(
+        onDismissRequest = { moveOpen = false },
+        title = { Text(tr(state.settings, "Move document", "移动文档")) },
+        text = {
+            LazyColumn(Modifier.height(300.dp)) {
+                item { TextButton(onClick = { model.moveDocument(doc, null); moveOpen = false }) { Text(tr(state.settings, "My Docs (root)", "我的文档（根目录）")) } }
+                items(state.folders, key = { it.id }) { folder ->
+                    TextButton(onClick = { model.moveDocument(doc, folder.id); moveOpen = false }) { Text(folderBreadcrumb(state.folders, folder.id)) }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { moveOpen = false }) { Text(tr(state.settings, "Cancel", "取消")) } },
     )
 }
 
 @Composable
-fun DocumentPreviewPages(document: Document) {
+fun DocumentPreviewPages(document: Document, settings: AppSettings, model: ClearScanViewModel) {
     var pages by remember(document.id, document.exportPath, document.pageCount) { mutableStateOf<List<Bitmap>>(emptyList()) }
     var loaded by remember(document.id, document.exportPath, document.pageCount) { mutableStateOf(false) }
     LaunchedEffect(document.id, document.exportPath, document.pageCount) {
         loaded = false
-        pages = withContext(Dispatchers.IO) {
-            if (document.type == "PDF") {
-                ImageProcessor.renderPdfPages(document.exportPath, maxPages = 24)
-            } else {
-                listOfNotNull(ImageProcessor.readBitmap(document.exportPath, 3072) ?: ImageProcessor.readBitmap(document.thumbnailPath, 3072))
-            }
-        }
+        pages = model.loadDocumentPages(document)
         loaded = true
     }
     if (pages.isEmpty()) {
@@ -2413,7 +3301,7 @@ fun DocumentPreviewPages(document: Document) {
             Thumbnail(document.thumbnailPath, Modifier.fillMaxWidth().aspectRatio(.72f))
         } else {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("Loading preview...", color = Muted)
+                Text(tr(settings, "Loading preview...", "正在加载预览..."), color = Muted)
             }
         }
         return
@@ -2437,28 +3325,28 @@ fun DocumentPreviewPages(document: Document) {
 }
 
 @Composable
-fun RenameDialog(current: String, onDismiss: () -> Unit, onRename: (String) -> Unit) {
+fun RenameDialog(settings: AppSettings, current: String, onDismiss: () -> Unit, onRename: (String) -> Unit) {
     var text by remember { mutableStateOf(current) }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Rename document") }, text = { OutlinedTextField(text, { text = it }, singleLine = true) }, confirmButton = { TextButton(onClick = { onRename(text) }) { Text("Save") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+    AlertDialog(onDismissRequest = onDismiss, title = { Text(tr(settings, "Rename document", "重命名文档")) }, text = { OutlinedTextField(text, { text = it }, singleLine = true) }, confirmButton = { TextButton(onClick = { onRename(text) }) { Text(tr(settings, "Save", "保存")) } }, dismissButton = { TextButton(onClick = onDismiss) { Text(tr(settings, "Cancel", "取消")) } })
 }
 
 @Composable
-fun PasswordDialog(hasPassword: Boolean, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+fun PasswordDialog(settings: AppSettings, hasPassword: Boolean, onDismiss: () -> Unit, onSave: (String) -> Unit) {
     var password by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (hasPassword) "Update password" else "Set document password") },
+        title = { Text(if (hasPassword) tr(settings, "Update password", "更新密码") else tr(settings, "Set document password", "设置文档密码")) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("This password is stored locally and protects this document inside ClearScan.", color = Muted, fontSize = 14.sp)
-                OutlinedTextField(password, { password = it }, singleLine = true, placeholder = { Text("Enter password") })
+                Text(tr(settings, "This password is stored locally and protects this document inside ClearScan.", "密码仅保存在本机，用于保护 ClearScan 内的此文档。"), color = Muted, fontSize = 14.sp)
+                OutlinedTextField(password, { password = it }, singleLine = true, placeholder = { Text(tr(settings, "Enter password", "输入密码")) })
             }
         },
-        confirmButton = { TextButton(onClick = { onSave(password) }) { Text("Save") } },
+        confirmButton = { TextButton(onClick = { onSave(password) }) { Text(tr(settings, "Save", "保存")) } },
         dismissButton = {
             Row {
-                if (hasPassword) TextButton(onClick = { onSave("") }) { Text("Remove") }
-                TextButton(onClick = onDismiss) { Text("Cancel") }
+                if (hasPassword) TextButton(onClick = { onSave("") }) { Text(tr(settings, "Remove", "移除")) }
+                TextButton(onClick = onDismiss) { Text(tr(settings, "Cancel", "取消")) }
             }
         },
     )
@@ -2642,6 +3530,7 @@ fun ToolsScreen(state: UiState, model: ClearScanViewModel) {
                     Triple("Split PDF", tr(settings, "Split PDF", "拆分 PDF"), Icons.Default.FileOpen),
                     Triple("Compress PDF", tr(settings, "Compress PDF", "压缩 PDF"), Icons.Default.PictureAsPdf),
                     Triple("QR Code Scan", tr(settings, "QR Code Scan", "二维码扫描"), Icons.Default.QrCodeScanner),
+                    Triple("Barcode Scan", tr(settings, "Barcode Scan", "条形码扫描"), Icons.Default.Search),
                     Triple("Watermark", tr(settings, "Watermark", "添加水印"), Icons.Default.WaterDrop),
                     Triple("Add Signature", tr(settings, "Add Signature", "添加签名"), Icons.Default.Edit),
                 ).forEach { item -> OptionRow(item.second, item.third) { model.runTool(item.first) } }
@@ -2833,9 +3722,33 @@ fun SettingsScreen(state: UiState, model: ClearScanViewModel, embedded: Boolean 
         item { SettingRow(label = tr(settings, "Theme", "主题"), icon = Icons.Default.Brightness6, value = tr(settings, settings.theme, if (settings.theme == "Light") "日间" else "夜间"), onClick = { activeDialog = "theme" }) }
         item { SettingRow(label = tr(settings, "Default Save Path", "默认保存路径"), icon = Icons.Default.Folder, value = settings.defaultSavePath, onClick = { activeDialog = "path" }) }
         item { SettingRow(label = tr(settings, "Password Lock", "文件密码锁"), icon = Icons.Default.Lock, value = tr(settings, "${settings.passwordMap.size} protected", "已保护 ${settings.passwordMap.size} 个文件"), onClick = { activeDialog = "password" }) }
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(8.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(tr(settings, "Updates", "应用更新"), fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Text("v${BuildConfig.VERSION_NAME}", color = Muted, fontSize = 13.sp)
+                    SettingToggle(tr(settings, "Automatically check for updates", "自动检查更新"), settings.autoCheckUpdates) { model.updateSettings(settings.copy(autoCheckUpdates = it)) }
+                    SettingToggle(tr(settings, "Automatically download updates", "自动下载更新"), settings.autoDownloadUpdates) { model.updateSettings(settings.copy(autoDownloadUpdates = it)) }
+                    SettingToggle(tr(settings, "Download on Wi-Fi only", "仅使用 Wi-Fi 下载"), settings.wifiOnlyUpdates) { model.updateSettings(settings.copy(wifiOnlyUpdates = it)) }
+                    state.updateInfo?.let { Text(tr(settings, "Version ${it.version} is available", "发现版本 ${it.version}"), color = Teal, fontWeight = FontWeight.SemiBold) }
+                    if (state.updateDownload.status == "downloading") {
+                        val progress = if (state.updateDownload.total > 0) state.updateDownload.downloaded.toFloat() / state.updateDownload.total else 0f
+                        androidx.compose.material3.LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) }, Modifier.fillMaxWidth())
+                    }
+                    state.updateDownload.error?.let { Text(it, color = ComposeColor(0xFFE53935), fontSize = 12.sp) }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton({ model.checkForUpdates(false) }, enabled = !state.checkingUpdate, modifier = Modifier.weight(1f)) { Text(tr(settings, "Check now", "立即检查")) }
+                        when (state.updateDownload.status) {
+                            "ready" -> Button(model::installDownloadedUpdate, Modifier.weight(1f)) { Text(tr(settings, "Install", "安装")) }
+                            else -> state.updateInfo?.let { info -> Button({ model.downloadUpdate(info) }, Modifier.weight(1f)) { Text(tr(settings, "Download", "下载")) } }
+                        }
+                    }
+                }
+            }
+        }
         item { SettingRow(label = tr(settings, "App Logs", "运行日志"), icon = Icons.Default.Description, value = tr(settings, "View", "查看"), onClick = model::openLogs) }
         item { SettingRow(label = tr(settings, "Help & Feedback", "帮助与反馈"), icon = Icons.Default.Info, onClick = model::openHelp) }
-        item { SettingRow(label = tr(settings, "About ClearScan", "关于 ClearScan"), icon = Icons.Default.Info, value = "v1.0.0", onClick = model::openAbout) }
+        item { SettingRow(label = tr(settings, "About ClearScan", "关于 ClearScan"), icon = Icons.Default.Info, value = "v${BuildConfig.VERSION_NAME}", onClick = model::openAbout) }
         item {
             OutlinedButton(onClick = model::logout, modifier = Modifier.fillMaxWidth().height(64.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = ComposeColor(0xFFE53935)), shape = RoundedCornerShape(9.dp)) {
                 Icon(Icons.AutoMirrored.Filled.Logout, null)
@@ -2844,21 +3757,21 @@ fun SettingsScreen(state: UiState, model: ClearScanViewModel, embedded: Boolean 
             }
         }
     }
-    if (activeDialog == "language") ChoiceDialog(
+    if (activeDialog == "language") ChoiceDialog(settings,
         title = tr(settings, "Language", "语言"),
         options = listOf("English", "中文"),
         selected = settings.language,
         onDismiss = { activeDialog = null },
         onSelect = { model.updateSettings(settings.copy(language = it)); activeDialog = null },
     )
-    if (activeDialog == "theme") ChoiceDialog(
+    if (activeDialog == "theme") ChoiceDialog(settings,
         title = tr(settings, "Theme", "主题"),
         options = listOf("Light", "Dark"),
         selected = settings.theme,
         onDismiss = { activeDialog = null },
         onSelect = { model.updateSettings(settings.copy(theme = it)); activeDialog = null },
     )
-    if (activeDialog == "path") ChoiceDialog(
+    if (activeDialog == "path") ChoiceDialog(settings,
         title = tr(settings, "Default Save Path", "默认保存路径"),
         options = listOf("Internal Storage", "Documents"),
         selected = settings.defaultSavePath,
@@ -2869,7 +3782,7 @@ fun SettingsScreen(state: UiState, model: ClearScanViewModel, embedded: Boolean 
 }
 
 @Composable
-fun ChoiceDialog(title: String, options: List<String>, selected: String, onDismiss: () -> Unit, onSelect: (String) -> Unit) {
+fun ChoiceDialog(settings: AppSettings, title: String, options: List<String>, selected: String, onDismiss: () -> Unit, onSelect: (String) -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title, color = MaterialTheme.colorScheme.onSurface) },
@@ -2886,7 +3799,7 @@ fun ChoiceDialog(title: String, options: List<String>, selected: String, onDismi
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(tr(settings, "Close", "关闭")) } },
     )
 }
 
@@ -2936,7 +3849,7 @@ fun AccountScreen(state: UiState, model: ClearScanViewModel) {
     var name by remember { mutableStateOf(state.settings.accountName.takeIf { it != "Guest" } ?: "") }
     var email by remember { mutableStateOf(state.settings.accountEmail) }
     LazyColumn(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding(), contentPadding = PaddingValues(24.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
-        item { TopTitle("My Account", model::back) }
+        item { TopTitle(tr(state.settings, "My Account", "我的账号"), model::back) }
         item {
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Box(Modifier.size(96.dp).clip(CircleShape).background(ComposeColor(0xFFE8FAF8)), contentAlignment = Alignment.Center) {
@@ -2944,17 +3857,17 @@ fun AccountScreen(state: UiState, model: ClearScanViewModel) {
                 }
             }
         }
-        item { OutlinedTextField(name, { name = it }, Modifier.fillMaxWidth(), label = { Text("Name") }, singleLine = true) }
-        item { OutlinedTextField(email, { email = it }, Modifier.fillMaxWidth(), label = { Text("Email") }, singleLine = true) }
+        item { OutlinedTextField(name, { name = it }, Modifier.fillMaxWidth(), label = { Text(tr(state.settings, "Name", "姓名")) }, singleLine = true) }
+        item { OutlinedTextField(email, { email = it }, Modifier.fillMaxWidth(), label = { Text(tr(state.settings, "Email", "邮箱")) }, singleLine = true) }
         item {
             Button(onClick = { model.login(name, email) }, modifier = Modifier.fillMaxWidth().height(58.dp), colors = ButtonDefaults.buttonColors(containerColor = Teal), shape = RoundedCornerShape(10.dp)) {
-                Text(if (state.settings.loggedIn) "Update Account" else "Sign In", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                Text(if (state.settings.loggedIn) tr(state.settings, "Update Account", "更新账号") else tr(state.settings, "Sign In", "登录"), fontSize = 18.sp, fontWeight = FontWeight.Bold)
             }
         }
         if (state.settings.loggedIn) {
             item {
                 OutlinedButton(onClick = model::logout, modifier = Modifier.fillMaxWidth().height(58.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = ComposeColor(0xFFE53935))) {
-                    Text("Log Out")
+                    Text(tr(state.settings, "Log Out", "退出登录"))
                 }
             }
         }
@@ -2962,14 +3875,13 @@ fun AccountScreen(state: UiState, model: ClearScanViewModel) {
 }
 
 @Composable
-fun HelpScreen(model: ClearScanViewModel) {
+fun HelpScreen(state: UiState, model: ClearScanViewModel) {
     LazyColumn(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding(), contentPadding = PaddingValues(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        item { TopTitle("Help", model::back) }
-        item { HelpCard("How do I scan a document?", "Tap Scan, align the page inside the frame, capture, drag the four crop corners, then tap Next and Save.") }
-        item { HelpCard("Why can I drag the crop corners?", "Each corner can be moved across the whole image. Pinch to zoom, pan the image, then drag the nearest corner to the document edge.") }
-        item { HelpCard("How do PDF tools work?", "Merge, split, compress, watermark and signature tools always ask you to select files first. The output is saved as a new document.") }
-        item { HelpCard("How do passwords work?", "Open a document, tap Password, and set a local password for that file. ClearScan stores it only on this device.") }
-        item { HelpCard("Feedback", "For issues, include your phone model, Android version, and the action you were taking. This local demo keeps feedback inside the app.") }
+        item { TopTitle(tr(state.settings, "Help", "帮助"), model::back) }
+        item { HelpCard(tr(state.settings, "How do I scan multiple pages?", "如何扫描多页？"), tr(state.settings, "Keep taking photos, tap the right Done button, then confirm each page crop and save them together.", "连续拍摄照片，点击右侧完成按钮，再逐页确认裁剪并统一保存。")) }
+        item { HelpCard(tr(state.settings, "How does smart alignment work?", "智能对齐如何工作？"), tr(state.settings, "ClearScan detects page edges locally. You can always drag any corner before continuing.", "ClearScan 会在本机识别页面边缘，你仍可在继续前拖动任意角点。")) }
+        item { HelpCard(tr(state.settings, "How do PDF tools work?", "PDF 工具如何使用？"), tr(state.settings, "Select files first. Every operation saves a new document and keeps the original.", "先选择文件；所有操作都会生成新文档并保留原文件。")) }
+        item { HelpCard(tr(state.settings, "Feedback", "问题反馈"), tr(state.settings, "Export App Logs and include your phone model, Android version, and reproduction steps.", "请导出运行日志，并附上手机型号、Android 版本和复现步骤。")) }
     }
 }
 
@@ -2996,7 +3908,7 @@ fun AboutScreen(state: UiState, model: ClearScanViewModel) {
         }
         Spacer(Modifier.height(28.dp))
         Text("ClearScan", Modifier.fillMaxWidth(), textAlign = TextAlign.Center, fontSize = 40.sp, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.onSurface)
-        Text("Version 1.0.0", Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = Muted, fontSize = 18.sp)
+        Text(tr(settings, "Version ${BuildConfig.VERSION_NAME}", "版本 ${BuildConfig.VERSION_NAME}"), Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = Muted, fontSize = 18.sp)
         Spacer(Modifier.height(36.dp))
         Text(tr(settings, "Scan Everything, Clearly", "清晰扫描一切"), Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = TealDark, fontSize = 23.sp, fontWeight = FontWeight.Bold)
         Text(tr(settings, "ClearScan helps you scan, save and\nmanage your documents easily.", "ClearScan 帮你轻松扫描、保存\n和管理所有文档。"), Modifier.fillMaxWidth().padding(top = 18.dp), textAlign = TextAlign.Center, color = Muted, fontSize = 18.sp, lineHeight = 27.sp)
@@ -3033,6 +3945,12 @@ fun LegalScreen(state: UiState, model: ClearScanViewModel) {
 fun AppLogsScreen(state: UiState, model: ClearScanViewModel) {
     val settings = state.settings
     val context = LocalContext.current
+    val exportTxt = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        if (uri != null) runCatching { LogExporter.exportTxt(context, uri, state.logText) }
+    }
+    val exportDocx = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/vnd.openxmlformats-officedocument.wordprocessingml.document")) { uri ->
+        if (uri != null) runCatching { LogExporter.exportDocx(context, uri, state.logText) }
+    }
     LaunchedEffect(Unit) { model.refreshLogs() }
     LazyColumn(
         Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding(),
@@ -3051,6 +3969,12 @@ fun AppLogsScreen(state: UiState, model: ClearScanViewModel) {
                 OutlinedButton(onClick = model::clearLogs, modifier = Modifier.weight(1f).height(48.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = ComposeColor(0xFFE53935))) {
                     Text(tr(settings, "Clear", "清空"))
                 }
+            }
+        }
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton({ exportTxt.launch("ClearScan-log-${System.currentTimeMillis()}.txt") }, Modifier.weight(1f)) { Text(tr(settings, "Export TXT", "导出 TXT")) }
+                OutlinedButton({ exportDocx.launch("ClearScan-log-${System.currentTimeMillis()}.docx") }, Modifier.weight(1f)) { Text(tr(settings, "Export Word", "导出 Word")) }
             }
         }
         item {
@@ -3501,17 +4425,9 @@ object ImageProcessor {
     }
 
     fun enhanceDocument(bitmap: Bitmap): Bitmap {
-        val minLongSide = 1800
-        val longSide = max(bitmap.width, bitmap.height)
-        val scaled = if (longSide < minLongSide) {
-            val scale = minLongSide.toFloat() / longSide.toFloat()
-            Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).roundToInt(), (bitmap.height * scale).roundToInt(), true)
-        } else {
-            bitmap
-        }
-        val balanced = grayWorldWhiteBalance(scaled)
-        val adjusted = adjust(balanced, .04f, 1.18f, 1.0f) ?: balanced
-        return sharpen(adjusted, amount = 1.25f)
+        val balanced = grayWorldWhiteBalance(bitmap)
+        val adjusted = adjust(balanced, .025f, 1.14f, 1.0f) ?: balanced
+        return sharpen(adjusted, amount = .72f)
     }
 
     private fun grayWorldWhiteBalance(bitmap: Bitmap): Bitmap {
@@ -3608,57 +4524,6 @@ object ImageProcessor {
         return out
     }
 
-    fun detectDocumentCorners(bitmap: Bitmap): List<Offset> {
-        val step = max(2, minOf(bitmap.width, bitmap.height) / 220)
-        var sum = 0L
-        var samples = 0
-        var y = 0
-        while (y < bitmap.height) {
-            var x = 0
-            while (x < bitmap.width) {
-                val color = bitmap.getPixel(x, y)
-                sum += ((Color.red(color) * 0.299f) + (Color.green(color) * 0.587f) + (Color.blue(color) * 0.114f)).roundToInt()
-                samples++
-                x += step
-            }
-            y += step
-        }
-        val average = if (samples == 0) 128 else (sum / samples).toInt()
-        val threshold = max(150, average + 18)
-        var left = bitmap.width
-        var top = bitmap.height
-        var right = 0
-        var bottom = 0
-        y = 0
-        while (y < bitmap.height) {
-            var x = 0
-            while (x < bitmap.width) {
-                val color = bitmap.getPixel(x, y)
-                val luminance = ((Color.red(color) * 0.299f) + (Color.green(color) * 0.587f) + (Color.blue(color) * 0.114f)).roundToInt()
-                val colorSpread = maxOf(Color.red(color), Color.green(color), Color.blue(color)) - minOf(Color.red(color), Color.green(color), Color.blue(color))
-                if (luminance >= threshold && colorSpread < 86) {
-                    left = minOf(left, x)
-                    top = minOf(top, y)
-                    right = maxOf(right, x)
-                    bottom = maxOf(bottom, y)
-                }
-                x += step
-            }
-            y += step
-        }
-        val detectedWidth = right - left
-        val detectedHeight = bottom - top
-        if (detectedWidth < bitmap.width * .28f || detectedHeight < bitmap.height * .28f) return defaultCropPoints()
-        val padX = detectedWidth * .025f
-        val padY = detectedHeight * .025f
-        return listOf(
-            Offset(((left - padX) / bitmap.width).coerceIn(0f, 1f), ((top - padY) / bitmap.height).coerceIn(0f, 1f)),
-            Offset(((right + padX) / bitmap.width).coerceIn(0f, 1f), ((top - padY) / bitmap.height).coerceIn(0f, 1f)),
-            Offset(((right + padX) / bitmap.width).coerceIn(0f, 1f), ((bottom + padY) / bitmap.height).coerceIn(0f, 1f)),
-            Offset(((left - padX) / bitmap.width).coerceIn(0f, 1f), ((bottom + padY) / bitmap.height).coerceIn(0f, 1f)),
-        )
-    }
-
     @VisibleForTesting
     fun perspectiveOutputSize(bitmapWidth: Int, bitmapHeight: Int, normalizedPoints: List<Offset>): Pair<Int, Int> {
         if (normalizedPoints.size < 4) return bitmapWidth to bitmapHeight
@@ -3676,10 +4541,33 @@ object ImageProcessor {
         if (bitmap == null) return null
         return when (filter) {
             "B&W" -> blackAndWhite(bitmap)
+            "Ink" -> sharpen(blackAndWhite(bitmap), .35f)
             "Gray" -> adjust(grayWorldWhiteBalance(bitmap), 0f, 1.08f, 0f)
+            "Soft Gray" -> adjust(grayWorldWhiteBalance(bitmap), .025f, .98f, 0f)
+            "Clean" -> sharpen(adjust(grayWorldWhiteBalance(bitmap), .02f, 1.10f, .96f) ?: bitmap, .48f)
+            "White Paper" -> whitePaper(bitmap)
             "Magic Color" -> adjust(grayWorldWhiteBalance(bitmap), .04f, 1.22f, 1.22f)
+            "Photo" -> sharpen(adjust(bitmap, 0f, 1.04f, 1.08f) ?: bitmap, .28f)
+            "High Contrast" -> sharpen(adjust(grayWorldWhiteBalance(bitmap), 0f, 1.36f, .78f) ?: bitmap, .65f)
             "Auto" -> enhanceDocument(bitmap)
             else -> bitmap
+        }
+    }
+
+    private fun whitePaper(bitmap: Bitmap): Bitmap {
+        val balanced = grayWorldWhiteBalance(bitmap)
+        val pixels = IntArray(balanced.width * balanced.height)
+        balanced.getPixels(pixels, 0, balanced.width, 0, 0, balanced.width, balanced.height)
+        fun lift(channel: Int): Int {
+            val normalized = ((channel - 14f) / 224f).coerceIn(0f, 1f)
+            return (255f * Math.pow(normalized.toDouble(), .88)).roundToInt().coerceIn(0, 255)
+        }
+        pixels.indices.forEach { index ->
+            val color = pixels[index]
+            pixels[index] = Color.rgb(lift(Color.red(color)), lift(Color.green(color)), lift(Color.blue(color)))
+        }
+        return Bitmap.createBitmap(balanced.width, balanced.height, Bitmap.Config.ARGB_8888).also {
+            it.setPixels(pixels, 0, balanced.width, 0, 0, balanced.width, balanced.height)
         }
     }
 
@@ -3803,7 +4691,7 @@ fun shareFile(
 ) {
     val file = File(doc.exportPath)
     if (!file.exists()) {
-        Toast.makeText(context, "File is no longer available", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, localized(context, "File is no longer available", "文件已不存在"), Toast.LENGTH_SHORT).show()
         AppLogger.w("Share", "Missing file for document ${doc.id}: ${doc.exportPath}")
         return
     }
@@ -3826,10 +4714,10 @@ fun shareFile(
     }.onFailure { error ->
         AppLogger.e("Share", "Unable to share to ${targetPackage ?: "system"}", error)
         if (targetPackage != null) {
-            Toast.makeText(context, "Target app is unavailable. Opening system share.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, localized(context, "Target app is unavailable. Opening system share.", "目标应用不可用，正在打开系统分享"), Toast.LENGTH_SHORT).show()
             shareFile(context, doc, targetPackage = null, chooserTitle = chooserTitle)
         } else {
-            Toast.makeText(context, "No compatible sharing app found", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, localized(context, "No compatible sharing app found", "未找到可用的分享应用"), Toast.LENGTH_SHORT).show()
         }
     }
 }
@@ -3844,7 +4732,7 @@ fun saveToGallery(context: Context, doc: Document) {
     val uri = context.contentResolver.insert(MediaStore.Files.getContentUri("external"), values)
     if (uri != null) {
         context.contentResolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
-        Toast.makeText(context, "Saved to Files", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, localized(context, "Saved to Files", "已保存到文件"), Toast.LENGTH_SHORT).show()
     }
 }
 
@@ -3873,7 +4761,7 @@ fun copyLogsToClipboard(context: Context, logs: String) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.setPrimaryClip(ClipData.newPlainText("ClearScan Logs", logs))
     AppLogger.i("Log", "Logs copied to clipboard")
-    Toast.makeText(context, "Logs copied", Toast.LENGTH_SHORT).show()
+    Toast.makeText(context, localized(context, "Logs copied", "日志已复制"), Toast.LENGTH_SHORT).show()
 }
 
 fun shareLogFile(context: Context) {
@@ -3887,5 +4775,8 @@ fun shareLogFile(context: Context) {
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
     AppLogger.i("Log", "Share log file")
-    context.startActivity(Intent.createChooser(intent, "Share ClearScan logs"))
+    context.startActivity(Intent.createChooser(intent, localized(context, "Share ClearScan logs", "分享 ClearScan 日志")))
 }
+
+fun localized(context: Context, english: String, chinese: String): String =
+    if (context.getSharedPreferences("clearscan-settings", Context.MODE_PRIVATE).getString("language", "English") == "中文") chinese else english

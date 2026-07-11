@@ -8,13 +8,15 @@ activityCompose = "1.12.0"
 composeBom = "2025.12.00"
 room = "2.8.4"
 coroutines = "1.10.2"
-cameraX = "1.5.1"
-exifinterface = "1.4.1"
-datastore = "1.2.0"
+cameraX = "1.6.1"
+exifinterface = "1.4.2"
+datastore = "1.2.1"
 mlkitBarcode = "17.3.0"
+opencv = "4.12.0"
 junit = "4.13.2"
 androidxTest = "1.6.1"
 espresso = "3.6.1"
+work = "2.11.2"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -39,7 +41,9 @@ androidx-camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycl
 androidx-camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "cameraX" }
 androidx-exifinterface = { group = "androidx.exifinterface", name = "exifinterface", version.ref = "exifinterface" }
 androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
+androidx-work-runtime = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "work" }
 google-mlkit-barcode = { group = "com.google.mlkit", name = "barcode-scanning", version.ref = "mlkitBarcode" }
+opencv = { group = "org.opencv", name = "opencv", version.ref = "opencv" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-test-core = { group = "androidx.test", name = "core", version.ref = "androidxTest" }
 androidx-test-runner = { group = "androidx.test", name = "runner", version.ref = "androidxTest" }

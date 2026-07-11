@@ -7,5 +7,7 @@ class ClearScanApp : Application() {
         super.onCreate()
         AppLogger.init(this)
         AppLogger.i("Application", "ClearScanApp started")
+        val prefs = getSharedPreferences("clearscan-settings", MODE_PRIVATE)
+        GitHubUpdateRepository.schedule(this, prefs.getBoolean("autoCheckUpdates", true), prefs.getBoolean("wifiOnlyUpdates", true))
     }
 }
