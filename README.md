@@ -65,6 +65,8 @@ CLEARSCAN_KEY_ALIAS
 CLEARSCAN_KEY_PASSWORD
 ```
 
+The tag-triggered release workflow remains disabled until the repository variable `RELEASE_SIGNING_CONFIGURED` is explicitly set to `true`. A maintainer may alternatively sign locally and upload only the signed APK and checksum, keeping the private signing key off GitHub.
+
 The Hy-MT2 model is not stored in this repository or packaged in the APK. ClearScan downloads it into app-private storage when translation is configured for the first time.
 
 ## Privacy

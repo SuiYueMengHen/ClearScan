@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   release:
+    if: ${{ vars.RELEASE_SIGNING_CONFIGURED == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
