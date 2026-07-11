@@ -80,3 +80,7 @@ ClearScan is under active development. Camera behavior, native inference perform
 ## Third-Party Software
 
 This repository includes a modified llama.cpp Android runtime under `third_party/llama.cpp`. Third-party components remain subject to their respective licenses and notices. Hy-MT2 model files are downloaded separately and are governed by the model publisher's terms.
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
