@@ -1,0 +1,54 @@
+# Android Studio and IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+captures/
+navigation.json
+
+# Gradle and Kotlin
+.gradle/
+.kotlin/
+**/build/
+build/
+
+# Android SDK configuration
+local.properties
+
+# Native build outputs
+**/.cxx/
+**/.externalNativeBuild/
+*.so
+*.a
+*.o
+
+# App packages and signing material
+*.apk
+*.aab
+*.ap_
+*.jks
+*.keystore
+keystore.properties
+
+# Downloaded AI models and partial downloads
+modelscope_hy_mt2/
+models/
+*.gguf
+*.gguf.*
+*.part
+*.download
+
+# Runtime data and logs
+*.log
+logs/
+
+# Local UI references
+ChatGPT Image *.png
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+
+# Nested repository metadata in vendored dependencies
+third_party/llama.cpp/.git/
+

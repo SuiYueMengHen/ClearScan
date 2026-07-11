@@ -1,0 +1,9 @@
+# Keep GitHub language statistics focused on ClearScan application code.
+third_party/llama.cpp/** linguist-vendored
+
+# Normalize text files across development platforms.
+* text=auto
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.sh text eol=lf
+
